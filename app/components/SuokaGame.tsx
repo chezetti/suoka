@@ -76,36 +76,41 @@ export default function SuokaGame() {
         const boardRect = stageBoard.getBoundingClientRect();
         const isMobile = window.innerWidth <= 768;
 
-        // Calculate padding based on screen size
-        let padding = 32; // default desktop padding
-        let heightPadding = 32;
+        // Get actual computed styles to read the real padding
+        const computedStyle = window.getComputedStyle(stageBoard);
+        const paddingLeft = parseFloat(computedStyle.paddingLeft) || 0;
+        const paddingRight = parseFloat(computedStyle.paddingRight) || 0;
+        const paddingTop = parseFloat(computedStyle.paddingTop) || 0;
+        const paddingBottom = parseFloat(computedStyle.paddingBottom) || 0;
 
+        const totalHorizontalPadding = paddingLeft + paddingRight;
+        const totalVerticalPadding = paddingTop + paddingBottom;
+
+        // Account for border if any
+        const borderLeft = parseFloat(computedStyle.borderLeftWidth) || 0;
+        const borderRight = parseFloat(computedStyle.borderRightWidth) || 0;
+        const borderTop = parseFloat(computedStyle.borderTopWidth) || 0;
+        const borderBottom = parseFloat(computedStyle.borderBottomWidth) || 0;
+
+        const totalHorizontalBorder = borderLeft + borderRight;
+        const totalVerticalBorder = borderTop + borderBottom;
+
+        // Calculate available space for canvas
+        let dynamicBoardW = Math.floor(
+          boardRect.width - totalHorizontalPadding - totalHorizontalBorder
+        );
+        let dynamicBoardH = Math.floor(
+          boardRect.height - totalVerticalPadding - totalVerticalBorder
+        );
+
+        // Ensure minimum and maximum sizes but respect container bounds
         if (isMobile) {
-          if (window.innerWidth <= 480) {
-            padding = 16; // phone padding (8px * 2)
-            heightPadding = 16;
-          } else {
-            padding = 20; // tablet padding (10px * 2)
-            heightPadding = 20;
-          }
-        }
-
-        let dynamicBoardW = Math.floor(boardRect.width - padding);
-        let dynamicBoardH = Math.floor(boardRect.height - heightPadding);
-
-        // Ensure minimum and maximum sizes
-        if (isMobile) {
-          dynamicBoardW = Math.max(
-            280,
-            Math.min(dynamicBoardW, window.innerWidth - 16)
-          );
-          dynamicBoardH = Math.max(
-            400,
-            Math.min(dynamicBoardH, window.innerHeight - 150) // Account for HUD
-          );
+          dynamicBoardW = Math.max(280, Math.min(dynamicBoardW, 800));
+          dynamicBoardH = Math.max(400, Math.min(dynamicBoardH, 1000));
         } else {
           dynamicBoardW = Math.max(500, Math.min(dynamicBoardW, 1200));
-          dynamicBoardH = 760; // Keep fixed height for desktop
+          // Don't use fixed height - respect container bounds
+          dynamicBoardH = Math.max(500, Math.min(dynamicBoardH, 1000));
         }
 
         return { dynamicBoardW, dynamicBoardH, isMobile };
@@ -158,7 +163,15 @@ export default function SuokaGame() {
           // Calculate spawn position based on the largest possible circle that could spawn
           const maxSpawnValue = 32; // Largest value from valueDist array
           const maxRadius = getRadiusForValue(maxSpawnValue);
-          return Math.max(maxRadius + 10, this.dangerLineY - maxRadius - 40);
+          // Ensure spawn is well above danger line and within canvas bounds
+          const minSpawnY = maxRadius;
+          const dangerOffset = maxRadius + 120; // Increased from 80 to 120px clearance from danger line
+          const calculatedY = Math.max(
+            minSpawnY,
+            this.dangerLineY - dangerOffset
+          );
+
+          return calculatedY;
         },
         gracePeriodMs: 800,
         dropCooldownMs: 140,
@@ -201,21 +214,21 @@ export default function SuokaGame() {
         ctx.imageSmoothingQuality = "medium";
       }
 
-      // Color mapping
+      // Neon Liquid Glass Color Mapping
       const colorMap: { [key: number]: string } = {
-        2: "#c7d2fe",
-        4: "#a5b4fc",
-        8: "#93c5fd",
-        16: "#7dd3fc",
-        32: "#6ee7f9",
-        64: "#6efacc",
-        128: "#a7f3d0",
-        256: "#fde68a",
-        512: "#fbbf24",
-        1024: "#fb923c",
-        2048: "#f87171",
-        4096: "#fb7185",
-        8192: "#f472b6",
+        2: "#c7d2fe", // lavender glow
+        4: "#a78bfa", // violet
+        8: "#60a5fa", // blue
+        16: "#67e8f9", // cyan
+        32: "#34d399", // emerald
+        64: "#facc15", // yellow
+        128: "#f97316", // orange
+        256: "#ef4444", // red
+        512: "#ec4899", // pink
+        1024: "#d946ef", // magenta
+        2048: "#a855f7", // bright purple
+        4096: "#8b5cf6", // deep purple
+        8192: "#7c3aed", // royal purple
       };
       const colorForValue = (v: number) => colorMap[v] || "#ddd6fe";
       const rollValue = () =>
@@ -227,35 +240,38 @@ export default function SuokaGame() {
       engine.velocityIterations = 6;
       engine.positionIterations = 6;
 
-      // Walls
-      const WALL_THICK = cfg.radius;
+      // Walls - improved positioning
+      const WALL_THICK = cfg.radius * 2; // Make walls thicker
       let walls = [
+        // Left wall
         Bodies.rectangle(
-          cfg.radius / 2,
+          -WALL_THICK / 2,
           cfg.boardH / 2,
           WALL_THICK,
-          cfg.boardH,
+          cfg.boardH + WALL_THICK,
           {
             isStatic: true,
             label: "wall",
             render: { visible: false },
           }
         ),
+        // Right wall
         Bodies.rectangle(
-          cfg.boardW - cfg.radius / 2,
+          cfg.boardW + WALL_THICK / 2,
           cfg.boardH / 2,
           WALL_THICK,
-          cfg.boardH,
+          cfg.boardH + WALL_THICK,
           {
             isStatic: true,
             label: "wall",
             render: { visible: false },
           }
         ),
+        // Bottom wall - positioned to prevent circles from falling out
         Bodies.rectangle(
           cfg.boardW / 2,
-          cfg.boardH - cfg.radius / 2,
-          cfg.boardW,
+          cfg.boardH + WALL_THICK / 2,
+          cfg.boardW + WALL_THICK * 2,
           WALL_THICK,
           {
             isStatic: true,
@@ -263,11 +279,12 @@ export default function SuokaGame() {
             render: { visible: false },
           }
         ),
+        // Top invisible wall to catch any stray circles
         Bodies.rectangle(
           cfg.boardW / 2,
-          -cfg.radius,
-          cfg.boardW,
-          cfg.radius * 2,
+          -WALL_THICK,
+          cfg.boardW + WALL_THICK * 2,
+          WALL_THICK,
           {
             isStatic: true,
             label: "ceiling",
@@ -557,45 +574,83 @@ export default function SuokaGame() {
         const fill = colorForValue(value);
         ctx.save();
 
+        // Liquid neon marble effects - subtle but color-matched glow
         const glowMultiplier =
           anim && anim.type === "spawn" ? 1 + anim.scale : 1;
-        ctx.shadowColor = fill;
-        ctx.shadowBlur = 16 * glowMultiplier;
+        const glowIntensity = 12 * glowMultiplier;
 
+        // Outer neon glow - matching fill color
+        ctx.shadowColor = fill;
+        ctx.shadowBlur = glowIntensity;
+        ctx.globalCompositeOperation = "source-over";
+
+        // Main circle body
         ctx.beginPath();
         ctx.arc(actualX, actualY, r, 0, Math.PI * 2);
         ctx.fillStyle = fill;
         ctx.fill();
 
+        // Reset shadow for inner elements
         ctx.shadowBlur = 0;
-        ctx.lineWidth = 4 * (r / baseRadius);
-        ctx.strokeStyle = "rgba(255,255,255,.22)";
-        ctx.beginPath();
-        ctx.arc(actualX, actualY, Math.max(1, r - 3), 0, Math.PI * 2);
-        ctx.stroke();
+        ctx.shadowColor = "transparent";
 
-        const grad = ctx.createRadialGradient(
-          actualX - r * 0.4,
-          actualY - r * 0.6,
-          1,
+        // Inner shadow for depth
+        const innerShadowGrad = ctx.createRadialGradient(
+          actualX,
+          actualY,
+          r * 0.7,
           actualX,
           actualY,
           r
         );
-        grad.addColorStop(0, "rgba(255,255,255,.35)");
-        grad.addColorStop(0.25, "rgba(255,255,255,.15)");
-        grad.addColorStop(1, "rgba(255,255,255,0)");
+        innerShadowGrad.addColorStop(0, "rgba(0,0,0,0)");
+        innerShadowGrad.addColorStop(1, "rgba(0,0,0,0.3)");
         ctx.beginPath();
-        ctx.arc(actualX, actualY, Math.max(1, r - 2), 0, Math.PI * 2);
-        ctx.fillStyle = grad;
+        ctx.arc(actualX, actualY, r, 0, Math.PI * 2);
+        ctx.fillStyle = innerShadowGrad;
         ctx.fill();
 
+        // Inner ring stroke - semi-transparent white
+        ctx.lineWidth = Math.max(1, 3 * (r / baseRadius));
+        ctx.strokeStyle = "rgba(255,255,255,0.4)";
+        ctx.beginPath();
+        ctx.arc(actualX, actualY, Math.max(1, r - 2), 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Inner glass highlight at top-left
+        const highlightGrad = ctx.createRadialGradient(
+          actualX - r * 0.3,
+          actualY - r * 0.4,
+          0,
+          actualX - r * 0.3,
+          actualY - r * 0.4,
+          r * 0.6
+        );
+        highlightGrad.addColorStop(0, "rgba(255,255,255,0.25)");
+        highlightGrad.addColorStop(0.3, "rgba(255,255,255,0.15)");
+        highlightGrad.addColorStop(1, "rgba(255,255,255,0)");
+
+        ctx.beginPath();
+        ctx.arc(actualX, actualY, Math.max(1, r - 1), 0, Math.PI * 2);
+        ctx.fillStyle = highlightGrad;
+        ctx.fill();
+
+        // Glowing text with neon effect
         if (r > baseRadius * 0.3) {
-          ctx.fillStyle = "#0b0e15";
           const fontSize = Math.max(10, 18 * (r / baseRadius));
-          ctx.font = `bold ${fontSize}px Inter, ui-sans-serif`;
+          ctx.font = `bold ${fontSize}px 'Inter Tight', Inter, ui-sans-serif`;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
+
+          // Text glow
+          ctx.shadowColor = "#ffffff";
+          ctx.shadowBlur = 8;
+          ctx.fillStyle = "#ffffff";
+          ctx.fillText(String(value), actualX, actualY);
+
+          // Additional text glow
+          ctx.shadowBlur = 4;
+          ctx.fillStyle = "#f8fafc";
           ctx.fillText(String(value), actualX, actualY);
         }
 
@@ -628,8 +683,8 @@ export default function SuokaGame() {
           const x = state.previewX;
           const v = state.nextValue;
           const r = cfg.getRadiusForValue(v);
-          // Calculate individual spawn Y for this specific circle size
-          const y = Math.max(r + 10, cfg.dangerLineY - r - 40);
+          // Use the same spawn Y logic as actual spawning
+          const y = cfg.spawnY;
           const fill = colorForValue(v);
 
           ctx.save();
@@ -711,8 +766,8 @@ export default function SuokaGame() {
         const radius = cfg.getRadiusForValue(value);
 
         let x = state.previewX;
-        // Calculate spawn Y for this specific circle
-        let y = Math.max(radius + 10, cfg.dangerLineY - radius - 40);
+        // Use the same spawn Y logic as preview and cfg
+        let y = cfg.spawnY;
 
         if (!isSpawnFree(x, y, value)) {
           const step = radius * 1.1;
@@ -734,7 +789,8 @@ export default function SuokaGame() {
           }
 
           if (!placed) {
-            const higherY = Math.max(radius, y - radius);
+            // Use the same spawn Y as configured, don't go higher
+            const safeY = cfg.spawnY;
             for (let i = 0; i <= 6; i++) {
               const testX =
                 state.previewX +
@@ -742,10 +798,10 @@ export default function SuokaGame() {
               if (
                 testX >= radius &&
                 testX <= cfg.boardW - radius &&
-                isSpawnFree(testX, higherY, value)
+                isSpawnFree(testX, safeY, value)
               ) {
                 x = testX;
-                y = higherY;
+                y = safeY;
                 placed = true;
                 break;
               }
@@ -1002,19 +1058,58 @@ export default function SuokaGame() {
         if (walls) {
           World.remove(engine.world, walls);
         }
+
+        // Use the same wall logic as initial creation
+        const WALL_THICK_RESIZE = cfg.radius * 2;
         walls = [
-          Bodies.rectangle(cfg.boardW / 2, -25, cfg.boardW, 50, {
-            isStatic: true,
-          }),
-          Bodies.rectangle(-25, cfg.boardH / 2, 50, cfg.boardH, {
-            isStatic: true,
-          }),
-          Bodies.rectangle(cfg.boardW + 25, cfg.boardH / 2, 50, cfg.boardH, {
-            isStatic: true,
-          }),
-          Bodies.rectangle(cfg.boardW / 2, cfg.boardH + 25, cfg.boardW, 50, {
-            isStatic: true,
-          }),
+          // Left wall
+          Bodies.rectangle(
+            -WALL_THICK_RESIZE / 2,
+            cfg.boardH / 2,
+            WALL_THICK_RESIZE,
+            cfg.boardH + WALL_THICK_RESIZE,
+            {
+              isStatic: true,
+              label: "wall",
+              render: { visible: false },
+            }
+          ),
+          // Right wall
+          Bodies.rectangle(
+            cfg.boardW + WALL_THICK_RESIZE / 2,
+            cfg.boardH / 2,
+            WALL_THICK_RESIZE,
+            cfg.boardH + WALL_THICK_RESIZE,
+            {
+              isStatic: true,
+              label: "wall",
+              render: { visible: false },
+            }
+          ),
+          // Bottom wall
+          Bodies.rectangle(
+            cfg.boardW / 2,
+            cfg.boardH + WALL_THICK_RESIZE / 2,
+            cfg.boardW + WALL_THICK_RESIZE * 2,
+            WALL_THICK_RESIZE,
+            {
+              isStatic: true,
+              label: "floor",
+              render: { visible: false },
+            }
+          ),
+          // Top wall
+          Bodies.rectangle(
+            cfg.boardW / 2,
+            -WALL_THICK_RESIZE,
+            cfg.boardW + WALL_THICK_RESIZE * 2,
+            WALL_THICK_RESIZE,
+            {
+              isStatic: true,
+              label: "ceiling",
+              render: { visible: false },
+            }
+          ),
         ];
         World.add(engine.world, walls);
       }
@@ -1089,13 +1184,14 @@ export default function SuokaGame() {
         <div className="hero__bar" aria-hidden="true"></div>
 
         <section className="glass card card--stage">
+          <h1 className="game__title">S U O K A</h1>
           <div className="stage__hud">
             <div className="hud__group">
               <div className="hud__chip">
                 <span>Score</span>
                 <strong>{gameState.score}</strong>
               </div>
-              <div className="hud__chip">
+              <div className="hud__chip hud__chip--best">
                 <span>Best</span>
                 <strong>{gameState.best}</strong>
               </div>
@@ -1122,12 +1218,7 @@ export default function SuokaGame() {
             <div className="danger" aria-hidden="true">
               <span>DANGER</span>
             </div>
-            <canvas
-              ref={canvasRef}
-              width="640"
-              height="760"
-              aria-label="SUOKA board"
-            />
+            <canvas ref={canvasRef} aria-label="SUOKA board" />
           </div>
         </section>
 
