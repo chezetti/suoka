@@ -114,15 +114,29 @@ export default function SuokaGame() {
       const { dynamicBoardW, dynamicBoardH, isMobile } =
         calculateBoardDimensions();
 
+      // Function to calculate radius based on value
+      function getRadiusForValue(value: number): number {
+        const baseRadius = 34;
+        const scaleFactor = Math.log2(value / 2) * 0.15; // Logarithmic scaling
+        return Math.max(
+          20,
+          Math.min(60, baseRadius + scaleFactor * baseRadius)
+        );
+      }
+
       const cfg = {
         boardW: dynamicBoardW,
         boardH: dynamicBoardH,
-        radius: 34,
+        radius: 34, // Base radius for calculations
+        getRadiusForValue,
         get dangerLineY() {
           return isMobile ? Math.min(120, dynamicBoardH * 0.15) : 120;
         },
         get spawnY() {
-          return this.dangerLineY - this.radius - 40;
+          // Calculate spawn position based on the largest possible circle that could spawn
+          const maxSpawnValue = 32; // Largest value from valueDist array
+          const maxRadius = getRadiusForValue(maxSpawnValue);
+          return Math.max(maxRadius + 10, this.dangerLineY - maxRadius - 40);
         },
         gracePeriodMs: 1500,
         dropCooldownMs: 140,
@@ -276,7 +290,8 @@ export default function SuokaGame() {
           showToastMessage("Object limit reached");
           return null;
         }
-        const body = Bodies.circle(x, y, cfg.radius, {
+        const radius = cfg.getRadiusForValue(value);
+        const body = Bodies.circle(x, y, radius, {
           label: "circle",
           restitution: cfg.restitution,
           friction: cfg.friction,
@@ -358,7 +373,8 @@ export default function SuokaGame() {
           x,
           y,
           colorForValue(A.value),
-          colorForValue(newValue)
+          colorForValue(newValue),
+          A.value
         );
 
         state.animations.set(A.body.id, {
@@ -418,15 +434,18 @@ export default function SuokaGame() {
         x: number,
         y: number,
         oldColor: string,
-        newColor: string
+        newColor: string,
+        circleValue: number = 2
       ) {
         const particleCount = 8 + Math.floor(Math.random() * 4);
+        const circleRadius = cfg.getRadiusForValue(circleValue);
+        const sizeMultiplier = circleRadius / cfg.radius; // Scale particles with circle size
 
         for (let i = 0; i < particleCount; i++) {
           const angle =
             (Math.PI * 2 * i) / particleCount + (Math.random() - 0.5) * 0.5;
-          const speed = 80 + Math.random() * 40;
-          const size = 3 + Math.random() * 4;
+          const speed = (80 + Math.random() * 40) * sizeMultiplier;
+          const size = (3 + Math.random() * 4) * sizeMultiplier;
           const life = 600 + Math.random() * 300;
 
           state.particles.push({
@@ -502,13 +521,14 @@ export default function SuokaGame() {
 
       // Drawing functions
       function drawCircle(x: number, y: number, value: number, bodyId: number) {
-        let r = cfg.radius;
+        const baseRadius = cfg.getRadiusForValue(value);
+        let r = baseRadius;
         let actualX = x,
           actualY = y;
 
         const anim = state.animations.get(bodyId);
         if (anim && anim.type === "spawn") {
-          r = cfg.radius * anim.scale;
+          r = baseRadius * anim.scale;
           if (r < 1) return;
         }
 
@@ -526,7 +546,7 @@ export default function SuokaGame() {
         ctx.fill();
 
         ctx.shadowBlur = 0;
-        ctx.lineWidth = 4 * (r / cfg.radius);
+        ctx.lineWidth = 4 * (r / baseRadius);
         ctx.strokeStyle = "rgba(255,255,255,.22)";
         ctx.beginPath();
         ctx.arc(actualX, actualY, Math.max(1, r - 3), 0, Math.PI * 2);
@@ -548,9 +568,9 @@ export default function SuokaGame() {
         ctx.fillStyle = grad;
         ctx.fill();
 
-        if (r > cfg.radius * 0.3) {
+        if (r > baseRadius * 0.3) {
           ctx.fillStyle = "#0b0e15";
-          const fontSize = Math.max(12, 18 * (r / cfg.radius));
+          const fontSize = Math.max(10, 18 * (r / baseRadius));
           ctx.font = `bold ${fontSize}px Inter, ui-sans-serif`;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
@@ -583,10 +603,11 @@ export default function SuokaGame() {
 
         // Preview circle
         if (!state.ended && !state.paused) {
-          const x = state.previewX,
-            y = cfg.spawnY;
-          const v = state.nextValue,
-            r = cfg.radius;
+          const x = state.previewX;
+          const v = state.nextValue;
+          const r = cfg.getRadiusForValue(v);
+          // Calculate individual spawn Y for this specific circle size
+          const y = Math.max(r + 10, cfg.dangerLineY - r - 40);
           const fill = colorForValue(v);
 
           ctx.save();
@@ -606,7 +627,8 @@ export default function SuokaGame() {
 
           const pulse = 0.95 + 0.05 * Math.sin(performance.now() * 0.003);
           ctx.fillStyle = "#0b0e15";
-          ctx.font = `bold ${18 * pulse}px Inter, ui-sans-serif`;
+          const fontSize = Math.max(10, 18 * (r / cfg.radius));
+          ctx.font = `bold ${fontSize * pulse}px Inter, ui-sans-serif`;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
           ctx.fillText(String(v), x, y);
@@ -630,21 +652,30 @@ export default function SuokaGame() {
       function updatePreviewFromClientX(clientX: number) {
         const rect = canvas.getBoundingClientRect();
         const x = (clientX - rect.left) * (cfg.boardW / rect.width);
+        const previewRadius = cfg.getRadiusForValue(state.nextValue);
         state.previewX = Math.max(
-          cfg.radius,
-          Math.min(cfg.boardW - cfg.radius, x)
+          previewRadius,
+          Math.min(cfg.boardW - previewRadius, x)
         );
       }
 
-      function isSpawnFree(x: number, y: number) {
+      function isSpawnFree(
+        x: number,
+        y: number,
+        value: number = state.nextValue
+      ) {
+        const spawnRadius = cfg.getRadiusForValue(value);
+
         for (const data of state.circles.values()) {
           const dx = x - data.body.position.x;
           const dy = y - data.body.position.y;
-          if (Math.hypot(dx, dy) < cfg.radius * 2.2) return false;
+          const existingRadius = cfg.getRadiusForValue(data.value);
+          const minDistance = (spawnRadius + existingRadius) * 1.1; // Small buffer
+          if (Math.hypot(dx, dy) < minDistance) return false;
         }
 
-        if (y < cfg.radius || y > cfg.boardH - cfg.radius) return false;
-        if (x < cfg.radius || x > cfg.boardW - cfg.radius) return false;
+        if (y < spawnRadius || y > cfg.boardH - spawnRadius) return false;
+        if (x < spawnRadius || x > cfg.boardW - spawnRadius) return false;
 
         return true;
       }
@@ -654,22 +685,26 @@ export default function SuokaGame() {
         const now = performance.now();
         if (now - state.lastDropTs < cfg.dropCooldownMs) return;
 
-        let x = state.previewX;
-        let y = cfg.spawnY;
+        const value = state.nextValue;
+        const radius = cfg.getRadiusForValue(value);
 
-        if (!isSpawnFree(x, y)) {
-          const step = cfg.radius * 1.1;
+        let x = state.previewX;
+        // Calculate spawn Y for this specific circle
+        let y = Math.max(radius + 10, cfg.dangerLineY - radius - 40);
+
+        if (!isSpawnFree(x, y, value)) {
+          const step = radius * 1.1;
           let placed = false;
 
           for (let i = 1; i <= 6; i++) {
             const xl = x - i * step,
               xr = x + i * step;
-            if (xl >= cfg.radius && isSpawnFree(xl, y)) {
+            if (xl >= radius && isSpawnFree(xl, y, value)) {
               x = xl;
               placed = true;
               break;
             }
-            if (xr <= cfg.boardW - cfg.radius && isSpawnFree(xr, y)) {
+            if (xr <= cfg.boardW - radius && isSpawnFree(xr, y, value)) {
               x = xr;
               placed = true;
               break;
@@ -677,15 +712,15 @@ export default function SuokaGame() {
           }
 
           if (!placed) {
-            const higherY = Math.max(cfg.radius, y - cfg.radius);
+            const higherY = Math.max(radius, y - radius);
             for (let i = 0; i <= 6; i++) {
               const testX =
                 state.previewX +
                 (i % 2 === 0 ? 1 : -1) * Math.floor(i / 2) * step;
               if (
-                testX >= cfg.radius &&
-                testX <= cfg.boardW - cfg.radius &&
-                isSpawnFree(testX, higherY)
+                testX >= radius &&
+                testX <= cfg.boardW - radius &&
+                isSpawnFree(testX, higherY, value)
               ) {
                 x = testX;
                 y = higherY;
@@ -701,7 +736,7 @@ export default function SuokaGame() {
           }
         }
 
-        const C = createCircle(x, y, state.nextValue);
+        const C = createCircle(x, y, value);
         if (C) {
           state.nextValue = rollValue();
           setGameState((prev) => ({ ...prev, nextValue: state.nextValue }));
@@ -713,7 +748,8 @@ export default function SuokaGame() {
       function checkDangerLine() {
         const now = performance.now();
         for (const data of state.circles.values()) {
-          const top = data.body.position.y - cfg.radius;
+          const circleRadius = cfg.getRadiusForValue(data.value);
+          const top = data.body.position.y - circleRadius;
           const age = now - data.bornAt;
 
           if (age > cfg.gracePeriodMs && top < cfg.dangerLineY) {
