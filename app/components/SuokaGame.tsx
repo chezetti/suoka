@@ -1191,13 +1191,9 @@ export default function SuokaGame() {
                 <span>Score</span>
                 <strong>{gameState.score}</strong>
               </div>
-              <div className="hud__chip hud__chip--best">
+              <div className="hud__chip">
                 <span>Best</span>
                 <strong>{gameState.best}</strong>
-              </div>
-              <div className="hud__chip">
-                <span>Next</span>
-                <strong>{gameState.nextValue}</strong>
               </div>
             </div>
             <div className="hud__actions">

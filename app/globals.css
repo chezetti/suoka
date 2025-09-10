@@ -716,11 +716,6 @@ body {
     flex: 1 1 auto;
     text-align: center;
   }
-
-  .hud__chip--best {
-    flex: 1.5 1 auto;
-    min-width: 90px;
-  }
   
   .hud__chip strong{ 
     font-size: 14px; 
@@ -812,11 +807,6 @@ body {
     padding: 10px 14px; 
     font-size: 13px;
   }
-
-  .hud__chip--best {
-    flex: 1.5 1 auto;
-    min-width: 110px;
-  }
   
   .hud__chip strong{ 
     font-size: 16px; 
@@ -895,11 +885,6 @@ body {
   .hud__chip{ 
     padding: 8px 10px; 
     font-size: 12px;
-  }
-
-  .hud__chip--best {
-    flex: 1.5 1 auto;
-    min-width: 85px;
   }
   
   .hud__chip span{
@@ -1007,11 +992,6 @@ body {
     padding: 8px 12px; 
     font-size: 12px;
   }
-
-  .hud__chip--best {
-    flex: 1.5 1 auto;
-    min-width: 100px;
-  }
   
   .hud__actions{
     gap: 8px;
@@ -1019,14 +999,14 @@ body {
     align-items: center;
   }
   
-  .btn{ 
-    padding: 6px 12px; 
-    font-size: 12px;
-    min-height: 36px;
-    min-width: 70px;
-    flex: none;
-    white-space: nowrap;
-  }
+    .btn{ 
+      padding: 6px 12px; 
+      font-size: 12px;
+      min-height: 36px;
+      min-width: 70px;
+      flex: none;
+      white-space: nowrap;
+    }
   
   .stage__board{ 
     padding: 8px; 
@@ -1035,35 +1015,6 @@ body {
   .modal__card{
     width: min(60vw, 400px); 
     padding: 16px;
-  }
-}
-
-/* Very narrow screens - stack buttons vertically if needed */
-@media (max-width: 320px) {
-  .stage__hud {
-    flex-direction: column;
-    gap: 6px;
-    align-items: stretch;
-  }
-  
-  .hud__group {
-    justify-content: center;
-    margin-bottom: 4px;
-  }
-
-  .hud__chip--best {
-    flex: 1.5 1 auto;
-    min-width: 90px;
-  }
-  
-  .hud__actions {
-    justify-content: center;
-    gap: 8px;
-  }
-  
-  .btn {
-    min-width: 85px;
-    font-size: 12px;
   }
 }
 
@@ -1089,5 +1040,29 @@ body {
   /* Larger canvas touch area for small screens */
   .stage__board canvas{
     min-height: 300px;
+  }
+}
+
+/* Very narrow screens - stack buttons vertically if needed */
+@media (max-width: 320px) {
+  .stage__hud {
+    flex-direction: column;
+    gap: 6px;
+    align-items: stretch;
+  }
+  
+  .hud__group {
+    justify-content: center;
+    margin-bottom: 4px;
+  }
+  
+  .hud__actions {
+    justify-content: center;
+    gap: 8px;
+  }
+  
+  .btn {
+    min-width: 85px;
+    font-size: 12px;
   }
 }
