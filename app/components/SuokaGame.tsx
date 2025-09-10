@@ -78,15 +78,20 @@ export default function SuokaGame() {
 
         // Calculate padding based on screen size
         let padding = 32; // default desktop padding
+        let heightPadding = 32;
+
         if (isMobile) {
           if (window.innerWidth <= 480) {
-            padding = 24; // phone padding (12px * 2)
+            padding = 16; // phone padding (8px * 2)
+            heightPadding = 16;
           } else {
-            padding = 24; // tablet padding (12px * 2)
+            padding = 20; // tablet padding (10px * 2)
+            heightPadding = 20;
           }
         }
 
         let dynamicBoardW = Math.floor(boardRect.width - padding);
+        let dynamicBoardH = Math.floor(boardRect.height - heightPadding);
 
         // Ensure minimum and maximum sizes
         if (isMobile) {
@@ -94,20 +99,28 @@ export default function SuokaGame() {
             280,
             Math.min(dynamicBoardW, window.innerWidth - 16)
           );
+          dynamicBoardH = Math.max(
+            400,
+            Math.min(dynamicBoardH, window.innerHeight - 150) // Account for HUD
+          );
         } else {
           dynamicBoardW = Math.max(500, Math.min(dynamicBoardW, 1200));
+          dynamicBoardH = 760; // Keep fixed height for desktop
         }
 
-        return { dynamicBoardW, isMobile };
+        return { dynamicBoardW, dynamicBoardH, isMobile };
       }
 
-      const { dynamicBoardW, isMobile } = calculateBoardDimensions();
+      const { dynamicBoardW, dynamicBoardH, isMobile } =
+        calculateBoardDimensions();
 
       const cfg = {
         boardW: dynamicBoardW,
-        boardH: 760,
+        boardH: dynamicBoardH,
         radius: 34,
-        dangerLineY: 120,
+        get dangerLineY() {
+          return isMobile ? Math.min(120, dynamicBoardH * 0.15) : 120;
+        },
         get spawnY() {
           return this.dangerLineY - this.radius - 40;
         },
@@ -865,6 +878,7 @@ export default function SuokaGame() {
       function handleResize() {
         const newDimensions = calculateBoardDimensions();
         cfg.boardW = newDimensions.dynamicBoardW;
+        cfg.boardH = newDimensions.dynamicBoardH;
 
         // Update canvas size
         const newDpr = newDimensions.isMobile
