@@ -1,36 +1,88 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# S U O K A - Next.js Edition
 
-## Getting Started
+Physics-based 2048 game with liquid glass UI, built with Next.js, TypeScript, and Matter.js.
 
-First, run the development server:
+## 🚀 Getting Started
+
+### Prerequisites
+
+- Node.js (v18 or higher)
+- npm or yarn
+
+### Installation
+
+1. **Install dependencies:**
+
+   ```bash
+   npm install
+   ```
+
+2. **Run the development server:**
+
+   ```bash
+   npm run dev
+   ```
+
+3. **Open your browser:**
+   Navigate to [http://localhost:3000](http://localhost:3000)
+
+### Build for Production
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run build
+npm start
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 🎮 Game Features
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- **Physics-based gameplay** using Matter.js
+- **Liquid glass UI** with animated backgrounds
+- **Instant merge mechanics** for responsive gameplay
+- **Particle effects** and smooth animations
+- **Responsive design** that works on all devices
+- **Dark theme** optimized for modern displays
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 🛠 Tech Stack
 
-## Learn More
+- **Next.js 15** - React framework with App Router
+- **TypeScript** - Type-safe development
+- **Matter.js** - 2D physics engine
+- **TailwindCSS 4** - Utility-first CSS framework
+- **Inter Font** - Modern typography
 
-To learn more about Next.js, take a look at the following resources:
+## 🎯 Game Rules
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Click or tap to drop circles onto the board
+2. Identical circles merge when they touch
+3. Avoid letting circles cross the red danger line
+4. Try to reach the highest score possible!
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 🎨 UI Highlights
 
-## Deploy on Vercel
+- **Animated gradient background** with subtle motion
+- **Glass morphism effects** for modern aesthetics
+- **Particle explosions** when circles merge
+- **Smooth animations** for all game interactions
+- **Responsive layout** that adapts to all screen sizes
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 📱 Controls
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **Mouse/Trackpad:** Move to position, click to drop
+- **Touch:** Tap and drag to position, tap to drop
+- **Keyboard:** Arrow keys to move, Space/Enter to drop
+- **P:** Pause/Resume
+- **R:** Restart game
+
+## 🔧 Development
+
+The game logic is contained in `app/components/SuokaGame.tsx` with all styles in `app/globals.css`.
+
+Key components:
+
+- Physics engine setup and collision detection
+- Particle system for visual effects
+- Animation system for smooth merging
+- Canvas rendering with high-DPI support
+- React state management for UI updates
+
+Enjoy playing S U O K A! 🎮✨
