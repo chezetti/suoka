@@ -130,7 +130,9 @@ export default function SuokaGame() {
         radius: 34, // Base radius for calculations
         getRadiusForValue,
         get dangerLineY() {
-          return isMobile ? Math.min(120, dynamicBoardH * 0.15) : 120;
+          return isMobile
+            ? Math.max(80, Math.min(150, dynamicBoardH * 0.2))
+            : 120;
         },
         get spawnY() {
           // Calculate spawn position based on the largest possible circle that could spawn
@@ -138,7 +140,7 @@ export default function SuokaGame() {
           const maxRadius = getRadiusForValue(maxSpawnValue);
           return Math.max(maxRadius + 10, this.dangerLineY - maxRadius - 40);
         },
-        gracePeriodMs: 1500,
+        gracePeriodMs: 800,
         dropCooldownMs: 140,
 
         // Physics
@@ -747,13 +749,55 @@ export default function SuokaGame() {
       // Game control
       function checkDangerLine() {
         const now = performance.now();
+
+        // Note: danger line detection with triple safety checks
+
         for (const data of state.circles.values()) {
           const circleRadius = cfg.getRadiusForValue(data.value);
           const top = data.body.position.y - circleRadius;
           const age = now - data.bornAt;
 
+          // Check if circle crosses danger line
+
           if (age > cfg.gracePeriodMs && top < cfg.dangerLineY) {
             endGame("Danger line crossed.");
+            return;
+          }
+
+          // Additional safety check: circle center crossed danger line (more strict)
+          if (
+            age > cfg.gracePeriodMs &&
+            data.body.position.y < cfg.dangerLineY
+          ) {
+            console.log(
+              `GAME OVER (strict): Circle ${
+                data.value
+              } center crossed danger line! center=${data.body.position.y.toFixed(
+                1
+              )}, danger=${cfg.dangerLineY}`
+            );
+            endGame("Danger line crossed.");
+            return;
+          }
+        }
+
+        // Emergency check: if there are many circles and some are clearly above danger line
+        if (state.circles.size > 12) {
+          let emergencyCount = 0;
+          for (const data of state.circles.values()) {
+            const age = now - data.bornAt;
+            if (
+              age > cfg.gracePeriodMs &&
+              data.body.position.y < cfg.dangerLineY + 30
+            ) {
+              emergencyCount++;
+            }
+          }
+          if (emergencyCount > 6) {
+            console.log(
+              `EMERGENCY GAME OVER: ${emergencyCount} circles above danger zone`
+            );
+            endGame("Too many circles stacked.");
             return;
           }
         }
@@ -761,6 +805,7 @@ export default function SuokaGame() {
 
       function endGame(reason: string) {
         if (state.ended) return;
+
         state.ended = true;
         state.running = false;
         state.endReason = reason;
