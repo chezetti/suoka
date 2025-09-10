@@ -111,23 +111,43 @@ export default function SuokaGame() {
         return { dynamicBoardW, dynamicBoardH, isMobile };
       }
 
-      const { dynamicBoardW, dynamicBoardH, isMobile } =
+      let { dynamicBoardW, dynamicBoardH, isMobile } =
         calculateBoardDimensions();
 
-      // Function to calculate radius based on value
+      // Function to calculate radius based on value and screen size
       function getRadiusForValue(value: number): number {
-        const baseRadius = 34;
+        // Calculate adaptive base radius based on field size
+        const minDimension = Math.min(dynamicBoardW, dynamicBoardH);
+        let baseRadius: number;
+
+        if (isMobile) {
+          // Mobile: scale based on field size, smaller for small screens
+          baseRadius = Math.max(16, Math.min(32, minDimension * 0.08));
+        } else {
+          // Desktop: standard sizing
+          baseRadius = 34;
+        }
+
         const scaleFactor = Math.log2(value / 2) * 0.15; // Logarithmic scaling
+        const minRadius = Math.max(12, baseRadius * 0.5);
+        const maxRadius = Math.max(40, baseRadius * 1.8);
+
         return Math.max(
-          20,
-          Math.min(60, baseRadius + scaleFactor * baseRadius)
+          minRadius,
+          Math.min(maxRadius, baseRadius + scaleFactor * baseRadius)
         );
       }
 
       const cfg = {
         boardW: dynamicBoardW,
         boardH: dynamicBoardH,
-        radius: 34, // Base radius for calculations
+        get radius() {
+          // Adaptive base radius for calculations
+          const minDimension = Math.min(dynamicBoardW, dynamicBoardH);
+          return isMobile
+            ? Math.max(16, Math.min(32, minDimension * 0.08))
+            : 34;
+        },
         getRadiusForValue,
         get dangerLineY() {
           return isMobile
@@ -958,6 +978,12 @@ export default function SuokaGame() {
       // Handle window resize
       function handleResize() {
         const newDimensions = calculateBoardDimensions();
+
+        // Update dimensions variables for getRadiusForValue function
+        dynamicBoardW = newDimensions.dynamicBoardW;
+        dynamicBoardH = newDimensions.dynamicBoardH;
+        isMobile = newDimensions.isMobile;
+
         cfg.boardW = newDimensions.dynamicBoardW;
         cfg.boardH = newDimensions.dynamicBoardH;
 
