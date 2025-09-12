@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 // TypeScript types for game state
 interface GameState {
@@ -13,17 +13,340 @@ interface GameState {
   endReason: string;
 }
 
-interface Particle {
+interface CircleData {
+  body: any;
+  value: number;
+  bornAt: number;
+  id: number;
+}
+
+interface Animation {
+  startTime: number;
+  duration: number;
+  type: "merge" | "spawn";
+  targetX?: number;
+  targetY?: number;
+  startX?: number;
+  startY?: number;
+  scale?: number;
+}
+
+interface MergeRequest {
+  bodyAId: number;
+  bodyBId: number;
   x: number;
   y: number;
-  vx: number;
-  vy: number;
-  size: number;
-  maxSize: number;
-  color: string;
-  life: number;
-  maxLife: number;
-  startTime: number;
+  value: number;
+  timestamp: number;
+}
+
+// Particle pool with SoA layout for better cache performance
+class ParticlePool {
+  private capacity: number;
+  private count: number;
+  private freeList: number[];
+
+  // Structure of Arrays for better cache locality
+  public x: Float32Array;
+  public y: Float32Array;
+  public vx: Float32Array;
+  public vy: Float32Array;
+  public size: Float32Array;
+  public maxSize: Float32Array;
+  public life: Float32Array;
+  public maxLife: Float32Array;
+  public startTime: Float32Array;
+  public colorIndex: Uint8Array; // Index into color palette
+
+  constructor(capacity = 300) {
+    this.capacity = capacity;
+    this.count = 0;
+    this.freeList = [];
+
+    this.x = new Float32Array(capacity);
+    this.y = new Float32Array(capacity);
+    this.vx = new Float32Array(capacity);
+    this.vy = new Float32Array(capacity);
+    this.size = new Float32Array(capacity);
+    this.maxSize = new Float32Array(capacity);
+    this.life = new Float32Array(capacity);
+    this.maxLife = new Float32Array(capacity);
+    this.startTime = new Float32Array(capacity);
+    this.colorIndex = new Uint8Array(capacity);
+
+    // Pre-populate free list
+    for (let i = capacity - 1; i >= 0; i--) {
+      this.freeList.push(i);
+    }
+  }
+
+  acquire(): number {
+    if (this.freeList.length === 0) return -1;
+    const index = this.freeList.pop()!;
+    this.count++;
+    return index;
+  }
+
+  release(index: number): void {
+    if (index < 0 || index >= this.capacity) return;
+    this.freeList.push(index);
+    this.count--;
+  }
+
+  clear(): void {
+    this.count = 0;
+    this.freeList.length = 0;
+    for (let i = this.capacity - 1; i >= 0; i--) {
+      this.freeList.push(i);
+    }
+  }
+
+  getActiveCount(): number {
+    return this.count;
+  }
+
+  getCapacity(): number {
+    return this.capacity;
+  }
+}
+
+// Sprite cache for pre-rendered circles
+class SpriteCache {
+  private cache = new Map<string, HTMLCanvasElement>();
+  private colorPalette: string[] = [];
+
+  constructor() {
+    // Pre-define color palette for indexing
+    this.colorPalette = [
+      "#c7d2fe",
+      "#a78bfa",
+      "#60a5fa",
+      "#67e8f9",
+      "#34d399",
+      "#facc15",
+      "#f97316",
+      "#ef4444",
+      "#ec4899",
+      "#d946ef",
+      "#a855f7",
+      "#8b5cf6",
+      "#7c3aed",
+      "#ddd6fe",
+    ];
+  }
+
+  getColorIndex(value: number): number {
+    const colorMap: { [key: number]: number } = {
+      2: 0,
+      4: 1,
+      8: 2,
+      16: 3,
+      32: 4,
+      64: 5,
+      128: 6,
+      256: 7,
+      512: 8,
+      1024: 9,
+      2048: 10,
+      4096: 11,
+      8192: 12,
+    };
+    return colorMap[value] ?? 13;
+  }
+
+  getColor(index: number): string {
+    return this.colorPalette[index] || "#ddd6fe";
+  }
+
+  private generateCacheKey(
+    value: number,
+    radiusBucket: number,
+    dpr: number
+  ): string {
+    return `${value}_${radiusBucket}_${dpr}`;
+  }
+
+  getSprite(value: number, radius: number, dpr: number): HTMLCanvasElement {
+    // Quantize radius to buckets to reduce cache misses
+    const radiusBucket = Math.round(radius / 4) * 4;
+    const key = this.generateCacheKey(value, radiusBucket, dpr);
+
+    let sprite = this.cache.get(key);
+    if (!sprite) {
+      sprite = this.createSprite(value, radiusBucket, dpr);
+      this.cache.set(key, sprite);
+    }
+    return sprite;
+  }
+
+  private createSprite(
+    value: number,
+    radius: number,
+    dpr: number
+  ): HTMLCanvasElement {
+    const canvas = document.createElement("canvas");
+    const size = radius * 2 + 40; // Extra padding for glow
+    canvas.width = size * dpr;
+    canvas.height = size * dpr;
+
+    const ctx = canvas.getContext("2d")!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const centerX = size / 2;
+    const centerY = size / 2;
+    const fill = this.getColor(this.getColorIndex(value));
+
+    // Pre-render all visual elements
+    ctx.save();
+
+    // Outer glow
+    ctx.shadowColor = fill;
+    ctx.shadowBlur = 12;
+    ctx.globalCompositeOperation = "source-over";
+
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+    ctx.fillStyle = fill;
+    ctx.fill();
+
+    // Reset shadow
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = "transparent";
+
+    // Inner shadow for depth
+    const innerShadowGrad = ctx.createRadialGradient(
+      centerX,
+      centerY,
+      radius * 0.7,
+      centerX,
+      centerY,
+      radius
+    );
+    innerShadowGrad.addColorStop(0, "rgba(0,0,0,0)");
+    innerShadowGrad.addColorStop(1, "rgba(0,0,0,0.3)");
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+    ctx.fillStyle = innerShadowGrad;
+    ctx.fill();
+
+    // Inner ring stroke
+    ctx.lineWidth = Math.max(1, 3);
+    ctx.strokeStyle = "rgba(255,255,255,0.4)";
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, Math.max(1, radius - 2), 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Inner glass highlight
+    const highlightGrad = ctx.createRadialGradient(
+      centerX - radius * 0.3,
+      centerY - radius * 0.4,
+      0,
+      centerX - radius * 0.3,
+      centerY - radius * 0.4,
+      radius * 0.6
+    );
+    highlightGrad.addColorStop(0, "rgba(255,255,255,0.25)");
+    highlightGrad.addColorStop(0.3, "rgba(255,255,255,0.15)");
+    highlightGrad.addColorStop(1, "rgba(255,255,255,0)");
+
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, Math.max(1, radius - 1), 0, Math.PI * 2);
+    ctx.fillStyle = highlightGrad;
+    ctx.fill();
+
+    // Text with glow effect
+    if (radius > 12) {
+      const fontSize = Math.max(10, 18 * (radius / 34));
+      ctx.font = `bold ${fontSize}px 'Inter Tight', Inter, ui-sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      // Text glow
+      ctx.shadowColor = "#ffffff";
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(String(value), centerX, centerY);
+
+      // Additional text layer
+      ctx.shadowBlur = 4;
+      ctx.fillStyle = "#f8fafc";
+      ctx.fillText(String(value), centerX, centerY);
+    }
+
+    ctx.restore();
+    return canvas;
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  size(): number {
+    return this.cache.size;
+  }
+}
+
+// Fixed timestep runner
+class FixedStepRunner {
+  private accumulator = 0;
+  private lastTime = 0;
+  private readonly fixedDt = 1000 / 60; // 60 FPS physics
+  private readonly maxFrameTime = 250; // Cap long frames
+
+  update(currentTime: number, updateFn: (dt: number) => void): void {
+    if (this.lastTime === 0) {
+      this.lastTime = currentTime;
+      return;
+    }
+
+    let frameTime = currentTime - this.lastTime;
+    this.lastTime = currentTime;
+
+    // Clamp frame time to prevent spiral of death
+    frameTime = Math.min(frameTime, this.maxFrameTime);
+    this.accumulator += frameTime;
+
+    // Process fixed timesteps
+    while (this.accumulator >= this.fixedDt) {
+      updateFn(this.fixedDt);
+      this.accumulator -= this.fixedDt;
+    }
+  }
+
+  reset(): void {
+    this.accumulator = 0;
+    this.lastTime = 0;
+  }
+}
+
+// Game state store for React synchronization
+class GameStateStore {
+  private state: GameState;
+  private listeners = new Set<() => void>();
+  private updateThrottle = 0;
+  private readonly throttleMs = 100; // 10 Hz updates to React
+
+  constructor(initialState: GameState) {
+    this.state = { ...initialState };
+  }
+
+  getState(): GameState {
+    return this.state;
+  }
+
+  setState(newState: Partial<GameState>): void {
+    const now = performance.now();
+    if (now - this.updateThrottle < this.throttleMs) return;
+
+    this.updateThrottle = now;
+    this.state = { ...this.state, ...newState };
+    this.listeners.forEach((listener) => listener());
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 }
 
 // Extend Window interface for custom properties
@@ -38,27 +361,49 @@ declare global {
 export default function SuokaGame() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageBoardRef = useRef<HTMLDivElement>(null);
-  const [gameState, setGameState] = useState<GameState>({
-    score: 0,
-    best: 0,
-    nextValue: 2,
-    running: false,
-    paused: false,
-    ended: false,
-    endReason: "",
-  });
+  const gameInstanceRef = useRef<any>(null);
+  const storeRef = useRef<GameStateStore | null>(null);
+
+  // Initialize store once
+  if (!storeRef.current) {
+    storeRef.current = new GameStateStore({
+      score: 0,
+      best: 0,
+      nextValue: 2,
+      running: false,
+      paused: false,
+      ended: false,
+      endReason: "",
+    });
+  }
+
+  const gameState = useSyncExternalStore(
+    storeRef.current.subscribe.bind(storeRef.current),
+    storeRef.current.getState.bind(storeRef.current),
+    () => ({
+      score: 0,
+      best: 0,
+      nextValue: 2,
+      running: false,
+      paused: false,
+      ended: false,
+      endReason: "",
+    })
+  );
+
   const [showModal, setShowModal] = useState(false);
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
-  const gameInstanceRef = useRef<any>(null);
 
   // Initialize game when component mounts
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    const store = storeRef.current!;
+
     // Load best score from localStorage on client side
     const savedBest = Number(localStorage.getItem("circle2048.best") || 0);
-    setGameState((prev) => ({ ...prev, best: savedBest }));
+    store.setState({ best: savedBest });
 
     const initGame = async () => {
       // Import Matter.js dynamically to avoid SSR issues
@@ -71,12 +416,19 @@ export default function SuokaGame() {
       const ctx = canvas.getContext("2d")!;
       const stageBoard = stageBoardRef.current;
 
+      // Initialize systems
+      const particlePool = new ParticlePool(300);
+      const spriteCache = new SpriteCache();
+      const stepRunner = new FixedStepRunner();
+      let resizeObserver: ResizeObserver | null = null;
+      let rafId = 0;
+      let lastBestSave = 0;
+
       // Calculate board dimensions dynamically
       function calculateBoardDimensions() {
         const boardRect = stageBoard.getBoundingClientRect();
         const isMobile = window.innerWidth <= 768;
 
-        // Get actual computed styles to read the real padding
         const computedStyle = window.getComputedStyle(stageBoard);
         const paddingLeft = parseFloat(computedStyle.paddingLeft) || 0;
         const paddingRight = parseFloat(computedStyle.paddingRight) || 0;
@@ -86,7 +438,6 @@ export default function SuokaGame() {
         const totalHorizontalPadding = paddingLeft + paddingRight;
         const totalVerticalPadding = paddingTop + paddingBottom;
 
-        // Account for border if any
         const borderLeft = parseFloat(computedStyle.borderLeftWidth) || 0;
         const borderRight = parseFloat(computedStyle.borderRightWidth) || 0;
         const borderTop = parseFloat(computedStyle.borderTopWidth) || 0;
@@ -95,7 +446,6 @@ export default function SuokaGame() {
         const totalHorizontalBorder = borderLeft + borderRight;
         const totalVerticalBorder = borderTop + borderBottom;
 
-        // Calculate available space for canvas
         let dynamicBoardW = Math.floor(
           boardRect.width - totalHorizontalPadding - totalHorizontalBorder
         );
@@ -103,13 +453,11 @@ export default function SuokaGame() {
           boardRect.height - totalVerticalPadding - totalVerticalBorder
         );
 
-        // Ensure minimum and maximum sizes but respect container bounds
         if (isMobile) {
           dynamicBoardW = Math.max(280, Math.min(dynamicBoardW, 800));
           dynamicBoardH = Math.max(400, Math.min(dynamicBoardH, 1000));
         } else {
           dynamicBoardW = Math.max(500, Math.min(dynamicBoardW, 1200));
-          // Don't use fixed height - respect container bounds
           dynamicBoardH = Math.max(500, Math.min(dynamicBoardH, 1000));
         }
 
@@ -121,19 +469,16 @@ export default function SuokaGame() {
 
       // Function to calculate radius based on value and screen size
       function getRadiusForValue(value: number): number {
-        // Calculate adaptive base radius based on field size
         const minDimension = Math.min(dynamicBoardW, dynamicBoardH);
         let baseRadius: number;
 
         if (isMobile) {
-          // Mobile: scale based on field size, smaller for small screens
           baseRadius = Math.max(16, Math.min(32, minDimension * 0.08));
         } else {
-          // Desktop: standard sizing
           baseRadius = 34;
         }
 
-        const scaleFactor = Math.log2(value / 2) * 0.15; // Logarithmic scaling
+        const scaleFactor = Math.log2(value / 2) * 0.15;
         const minRadius = Math.max(12, baseRadius * 0.5);
         const maxRadius = Math.max(40, baseRadius * 1.8);
 
@@ -147,7 +492,6 @@ export default function SuokaGame() {
         boardW: dynamicBoardW,
         boardH: dynamicBoardH,
         get radius() {
-          // Adaptive base radius for calculations
           const minDimension = Math.min(dynamicBoardW, dynamicBoardH);
           return isMobile
             ? Math.max(16, Math.min(32, minDimension * 0.08))
@@ -160,23 +504,14 @@ export default function SuokaGame() {
             : 120;
         },
         get spawnY() {
-          // Calculate spawn position based on the largest possible circle that could spawn
-          const maxSpawnValue = 32; // Largest value from valueDist array
+          const maxSpawnValue = 32;
           const maxRadius = getRadiusForValue(maxSpawnValue);
-          // Ensure spawn is well above danger line and within canvas bounds
           const minSpawnY = maxRadius;
-          const dangerOffset = maxRadius + 120; // Increased from 80 to 120px clearance from danger line
-          const calculatedY = Math.max(
-            minSpawnY,
-            this.dangerLineY - dangerOffset
-          );
-
-          return calculatedY;
+          const dangerOffset = maxRadius + 120;
+          return Math.max(minSpawnY, this.dangerLineY - dangerOffset);
         },
         gracePeriodMs: 800,
-        dropCooldownMs: 140,
-
-        // Physics
+        dropCooldownMs: 400,
         gravity: 1.0,
         restitution: 0.08,
         friction: 0.25,
@@ -185,18 +520,13 @@ export default function SuokaGame() {
         sleepThreshold: 60,
         maxVelocity: 900,
         maxCircles: 150,
-
-        // Merge thresholds (instant merging)
         mergeSpeedMax: 200,
         mergeRelSpeedMax: 300,
-
-        // Spawn value distribution
         valueDist: [2, 2, 2, 2, 2, 4, 4, 8, 16, 32],
         scoreMul: 1,
       };
 
       // Canvas setup with mobile optimization
-      // Lower DPR on mobile for better performance
       const baseDpr = window.devicePixelRatio || 1;
       const dpr = isMobile
         ? Math.max(1, Math.min(1.5, baseDpr))
@@ -208,42 +538,23 @@ export default function SuokaGame() {
       canvas.style.height = cfg.boardH + "px";
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      // Mobile-specific canvas optimizations
       if (isMobile) {
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "medium";
       }
 
-      // Neon Liquid Glass Color Mapping
-      const colorMap: { [key: number]: string } = {
-        2: "#c7d2fe", // lavender glow
-        4: "#a78bfa", // violet
-        8: "#60a5fa", // blue
-        16: "#67e8f9", // cyan
-        32: "#34d399", // emerald
-        64: "#facc15", // yellow
-        128: "#f97316", // orange
-        256: "#ef4444", // red
-        512: "#ec4899", // pink
-        1024: "#d946ef", // magenta
-        2048: "#a855f7", // bright purple
-        4096: "#8b5cf6", // deep purple
-        8192: "#7c3aed", // royal purple
-      };
-      const colorForValue = (v: number) => colorMap[v] || "#ddd6fe";
       const rollValue = () =>
         cfg.valueDist[Math.floor(Math.random() * cfg.valueDist.length)];
 
       // Physics engine
       const engine = Engine.create({ enableSleeping: true });
       engine.world.gravity.y = cfg.gravity;
-      engine.velocityIterations = 6;
-      engine.positionIterations = 6;
+      engine.velocityIterations = 4;
+      engine.positionIterations = 4;
 
-      // Walls - improved positioning
-      const WALL_THICK = cfg.radius * 2; // Make walls thicker
+      // Walls
+      const WALL_THICK = cfg.radius * 2;
       let walls = [
-        // Left wall
         Bodies.rectangle(
           -WALL_THICK / 2,
           cfg.boardH / 2,
@@ -255,7 +566,6 @@ export default function SuokaGame() {
             render: { visible: false },
           }
         ),
-        // Right wall
         Bodies.rectangle(
           cfg.boardW + WALL_THICK / 2,
           cfg.boardH / 2,
@@ -267,7 +577,6 @@ export default function SuokaGame() {
             render: { visible: false },
           }
         ),
-        // Bottom wall - positioned to prevent circles from falling out
         Bodies.rectangle(
           cfg.boardW / 2,
           cfg.boardH + WALL_THICK / 2,
@@ -279,7 +588,6 @@ export default function SuokaGame() {
             render: { visible: false },
           }
         ),
-        // Top invisible wall to catch any stray circles
         Bodies.rectangle(
           cfg.boardW / 2,
           -WALL_THICK,
@@ -302,18 +610,20 @@ export default function SuokaGame() {
         nextValue: rollValue(),
         running: false,
         paused: false,
-        lastDropTs: 0,
+        lastDropTs: performance.now(),
         ended: false,
         endReason: "",
-        circles: new Map(),
+        circles: new Map<number, CircleData>(),
         nextLocalId: 1,
-        mergingCircles: new Set(),
-        particles: [] as Particle[],
-        animations: new Map(),
+        mergingCircles: new Set<number>(),
+        animations: new Map<number, Animation>(),
+        mergeQueue: [] as MergeRequest[],
+        highestCircleTop: cfg.boardH, // Track for O(1) danger line check
+        previewUpdateTime: 0,
       };
 
-      // Update React state
-      setGameState({
+      // Sync initial state
+      store.setState({
         score: state.score,
         best: state.best,
         nextValue: state.nextValue,
@@ -324,11 +634,16 @@ export default function SuokaGame() {
       });
 
       // Create circle function
-      function createCircle(x: number, y: number, value: number) {
+      function createCircle(
+        x: number,
+        y: number,
+        value: number
+      ): CircleData | null {
         if (state.circles.size >= cfg.maxCircles) {
           showToastMessage("Object limit reached");
           return null;
         }
+
         const radius = cfg.getRadiusForValue(value);
         const body = Bodies.circle(x, y, radius, {
           label: "circle",
@@ -340,7 +655,7 @@ export default function SuokaGame() {
         });
 
         World.add(engine.world, body);
-        const data = {
+        const data: CircleData = {
           body,
           value,
           bornAt: performance.now(),
@@ -351,7 +666,7 @@ export default function SuokaGame() {
       }
 
       // Remove circle function
-      function removeCircle(bodyId: number) {
+      function removeCircle(bodyId: number): void {
         const data = state.circles.get(bodyId);
         if (!data) return;
         try {
@@ -361,8 +676,9 @@ export default function SuokaGame() {
         state.mergingCircles.delete(bodyId);
       }
 
-      // Collision handling for instant merge
+      // Collision handling - just queue merges
       Events.on(engine, "collisionStart", ({ pairs }) => {
+        const now = performance.now();
         for (const { bodyA, bodyB } of pairs) {
           if (bodyA.label !== "circle" || bodyB.label !== "circle") continue;
           const A = state.circles.get(bodyA.id);
@@ -386,38 +702,62 @@ export default function SuokaGame() {
             relSpeed < cfg.mergeRelSpeedMax;
 
           if (canMerge) {
-            performMerge(A, B);
+            // Queue merge instead of processing immediately
+            state.mergeQueue.push({
+              bodyAId: bodyA.id,
+              bodyBId: bodyB.id,
+              x: (bodyA.position.x + bodyB.position.x) / 2,
+              y: (bodyA.position.y + bodyB.position.y) / 2,
+              value: A.value,
+              timestamp: now,
+            });
           }
         }
       });
 
-      // Merge function
-      function performMerge(A: any, B: any) {
-        if (!state.circles.has(A.body.id) || !state.circles.has(B.body.id))
-          return;
-        if (
-          state.mergingCircles.has(A.body.id) ||
-          state.mergingCircles.has(B.body.id)
-        )
-          return;
+      // Process merge queue (called after physics step)
+      function processMergeQueue(): void {
+        while (state.mergeQueue.length > 0) {
+          const merge = state.mergeQueue.shift()!;
+          const A = state.circles.get(merge.bodyAId);
+          const B = state.circles.get(merge.bodyBId);
 
+          if (
+            !A ||
+            !B ||
+            state.mergingCircles.has(A.body.id) ||
+            state.mergingCircles.has(B.body.id)
+          ) {
+            continue;
+          }
+
+          performMerge(A, B, merge.x, merge.y);
+        }
+      }
+
+      // Merge function - deterministic, no setTimeout
+      function performMerge(
+        A: CircleData,
+        B: CircleData,
+        x: number,
+        y: number
+      ): void {
         state.mergingCircles.add(A.body.id);
         state.mergingCircles.add(B.body.id);
 
-        const x = (A.body.position.x + B.body.position.x) / 2;
-        const y = (A.body.position.y + B.body.position.y) / 2;
         const newValue = A.value * 2;
-
         createMergeExplosion(
           x,
           y,
-          colorForValue(A.value),
-          colorForValue(newValue),
+          spriteCache.getColorIndex(A.value),
+          spriteCache.getColorIndex(newValue),
           A.value
         );
 
+        // Store merge animations
+        const now = performance.now();
         state.animations.set(A.body.id, {
-          startTime: performance.now(),
+          startTime: now,
           duration: 300,
           type: "merge",
           targetX: x,
@@ -426,7 +766,7 @@ export default function SuokaGame() {
           startY: A.body.position.y,
         });
         state.animations.set(B.body.id, {
-          startTime: performance.now(),
+          startTime: now,
           duration: 300,
           type: "merge",
           targetX: x,
@@ -438,20 +778,20 @@ export default function SuokaGame() {
         state.score += newValue * cfg.scoreMul;
         if (state.score > state.best) {
           state.best = state.score;
-          localStorage.setItem("circle2048.best", String(state.best));
+          // Debounce localStorage writes
+          const now = performance.now();
+          if (now - lastBestSave > 1000) {
+            localStorage.setItem("circle2048.best", String(state.best));
+            lastBestSave = now;
+          }
         }
 
-        // Update React state
-        setGameState((prev) => ({
-          ...prev,
-          score: state.score,
-          best: state.best,
-        }));
+        store.setState({ score: state.score, best: state.best });
 
+        // Schedule creation of new circle (deterministic timing)
         setTimeout(() => {
           removeCircle(A.body.id);
           removeCircle(B.body.id);
-
           state.mergingCircles.delete(A.body.id);
           state.mergingCircles.delete(B.body.id);
 
@@ -472,61 +812,65 @@ export default function SuokaGame() {
       function createMergeExplosion(
         x: number,
         y: number,
-        oldColor: string,
-        newColor: string,
-        circleValue: number = 2
-      ) {
+        oldColorIndex: number,
+        newColorIndex: number,
+        circleValue = 2
+      ): void {
         const particleCount = 8 + Math.floor(Math.random() * 4);
         const circleRadius = cfg.getRadiusForValue(circleValue);
-        const sizeMultiplier = circleRadius / cfg.radius; // Scale particles with circle size
+        const sizeMultiplier = circleRadius / cfg.radius;
 
         for (let i = 0; i < particleCount; i++) {
+          const particleIndex = particlePool.acquire();
+          if (particleIndex === -1) break; // Pool exhausted
+
           const angle =
             (Math.PI * 2 * i) / particleCount + (Math.random() - 0.5) * 0.5;
           const speed = (80 + Math.random() * 40) * sizeMultiplier;
           const size = (3 + Math.random() * 4) * sizeMultiplier;
           const life = 600 + Math.random() * 300;
 
-          state.particles.push({
-            x,
-            y,
-            vx: Math.cos(angle) * speed,
-            vy: Math.sin(angle) * speed,
-            size,
-            maxSize: size,
-            color: Math.random() > 0.5 ? oldColor : newColor,
-            life,
-            maxLife: life,
-            startTime: performance.now(),
-          } as Particle);
+          particlePool.x[particleIndex] = x;
+          particlePool.y[particleIndex] = y;
+          particlePool.vx[particleIndex] = Math.cos(angle) * speed;
+          particlePool.vy[particleIndex] = Math.sin(angle) * speed;
+          particlePool.size[particleIndex] = size;
+          particlePool.maxSize[particleIndex] = size;
+          particlePool.life[particleIndex] = life;
+          particlePool.maxLife[particleIndex] = life;
+          particlePool.startTime[particleIndex] = performance.now();
+          particlePool.colorIndex[particleIndex] =
+            Math.random() > 0.5 ? oldColorIndex : newColorIndex;
         }
       }
 
-      function updateParticles() {
+      function updateParticles(): void {
         const now = performance.now();
+        const dt = 0.016; // Fixed timestep
 
-        for (let i = state.particles.length - 1; i >= 0; i--) {
-          const p = state.particles[i];
-          const elapsed = now - p.startTime;
+        for (let i = 0; i < particlePool.getCapacity(); i++) {
+          if (particlePool.life[i] <= 0) continue;
 
-          if (elapsed >= p.maxLife) {
-            state.particles.splice(i, 1);
+          const elapsed = now - particlePool.startTime[i];
+          if (elapsed >= particlePool.maxLife[i]) {
+            particlePool.release(i);
             continue;
           }
 
-          p.x += p.vx * 0.016;
-          p.y += p.vy * 0.016;
-          p.vy += 200 * 0.016;
-          p.vx *= 0.98;
-          p.vy *= 0.98;
+          particlePool.x[i] += particlePool.vx[i] * dt;
+          particlePool.y[i] += particlePool.vy[i] * dt;
+          particlePool.vy[i] += 200 * dt;
+          particlePool.vx[i] *= 0.98;
+          particlePool.vy[i] *= 0.98;
 
-          const lifeRatio = elapsed / p.maxLife;
-          p.life = p.maxLife * (1 - lifeRatio);
-          p.size = p.maxSize * (1 - lifeRatio * 0.8);
+          const lifeRatio = elapsed / particlePool.maxLife[i];
+          particlePool.life[i] = particlePool.maxLife[i] * (1 - lifeRatio);
+          particlePool.size[i] =
+            particlePool.maxSize[i] * (1 - lifeRatio * 0.8);
         }
       }
 
-      function updateAnimations() {
+      function updateAnimations(): void {
         const now = performance.now();
         const toDelete: number[] = [];
 
@@ -543,7 +887,13 @@ export default function SuokaGame() {
 
           if (anim.type === "merge") {
             const data = state.circles.get(bodyId);
-            if (data) {
+            if (
+              data &&
+              anim.targetX !== undefined &&
+              anim.targetY !== undefined &&
+              anim.startX !== undefined &&
+              anim.startY !== undefined
+            ) {
               const currentX =
                 anim.startX + (anim.targetX - anim.startX) * eased;
               const currentY =
@@ -558,161 +908,179 @@ export default function SuokaGame() {
         toDelete.forEach((id) => state.animations.delete(id));
       }
 
-      // Drawing functions
-      function drawCircle(x: number, y: number, value: number, bodyId: number) {
+      // Fast danger line check
+      function updateHighestCircle(): void {
+        state.highestCircleTop = cfg.boardH;
+        for (const data of state.circles.values()) {
+          const radius = cfg.getRadiusForValue(data.value);
+          const top = data.body.position.y - radius;
+          if (top < state.highestCircleTop) {
+            state.highestCircleTop = top;
+          }
+        }
+      }
+
+      function checkDangerLine(): void {
+        if (state.highestCircleTop > cfg.dangerLineY) return; // Fast path
+
+        const now = performance.now();
+        for (const data of state.circles.values()) {
+          const age = now - data.bornAt;
+          if (age <= cfg.gracePeriodMs) continue;
+
+          const circleRadius = cfg.getRadiusForValue(data.value);
+          const top = data.body.position.y - circleRadius;
+
+          if (top < cfg.dangerLineY || data.body.position.y < cfg.dangerLineY) {
+            endGame("Danger line crossed.");
+            return;
+          }
+        }
+
+        // Emergency check
+        if (state.circles.size > 12) {
+          let emergencyCount = 0;
+          for (const data of state.circles.values()) {
+            const age = now - data.bornAt;
+            if (
+              age > cfg.gracePeriodMs &&
+              data.body.position.y < cfg.dangerLineY + 30
+            ) {
+              emergencyCount++;
+            }
+          }
+          if (emergencyCount > 6) {
+            endGame("Too many circles stacked.");
+            return;
+          }
+        }
+      }
+
+      // Drawing functions with sprite cache
+      function drawCircle(
+        x: number,
+        y: number,
+        value: number,
+        bodyId: number
+      ): void {
         const baseRadius = cfg.getRadiusForValue(value);
         let r = baseRadius;
-        let actualX = x,
-          actualY = y;
 
         const anim = state.animations.get(bodyId);
         if (anim && anim.type === "spawn") {
-          r = baseRadius * anim.scale;
+          r = baseRadius * (anim.scale || 0);
           if (r < 1) return;
         }
 
-        const fill = colorForValue(value);
-        ctx.save();
+        // Use cached sprite
+        const sprite = spriteCache.getSprite(value, r, dpr);
+        const spriteSize = sprite.width / dpr;
 
-        // Liquid neon marble effects - subtle but color-matched glow
-        const glowMultiplier =
-          anim && anim.type === "spawn" ? 1 + anim.scale : 1;
-        const glowIntensity = 12 * glowMultiplier;
-
-        // Outer neon glow - matching fill color
-        ctx.shadowColor = fill;
-        ctx.shadowBlur = glowIntensity;
-        ctx.globalCompositeOperation = "source-over";
-
-        // Main circle body
-        ctx.beginPath();
-        ctx.arc(actualX, actualY, r, 0, Math.PI * 2);
-        ctx.fillStyle = fill;
-        ctx.fill();
-
-        // Reset shadow for inner elements
-        ctx.shadowBlur = 0;
-        ctx.shadowColor = "transparent";
-
-        // Inner shadow for depth
-        const innerShadowGrad = ctx.createRadialGradient(
-          actualX,
-          actualY,
-          r * 0.7,
-          actualX,
-          actualY,
-          r
+        ctx.drawImage(
+          sprite,
+          x - spriteSize / 2,
+          y - spriteSize / 2,
+          spriteSize,
+          spriteSize
         );
-        innerShadowGrad.addColorStop(0, "rgba(0,0,0,0)");
-        innerShadowGrad.addColorStop(1, "rgba(0,0,0,0.3)");
-        ctx.beginPath();
-        ctx.arc(actualX, actualY, r, 0, Math.PI * 2);
-        ctx.fillStyle = innerShadowGrad;
-        ctx.fill();
-
-        // Inner ring stroke - semi-transparent white
-        ctx.lineWidth = Math.max(1, 3 * (r / baseRadius));
-        ctx.strokeStyle = "rgba(255,255,255,0.4)";
-        ctx.beginPath();
-        ctx.arc(actualX, actualY, Math.max(1, r - 2), 0, Math.PI * 2);
-        ctx.stroke();
-
-        // Inner glass highlight at top-left
-        const highlightGrad = ctx.createRadialGradient(
-          actualX - r * 0.3,
-          actualY - r * 0.4,
-          0,
-          actualX - r * 0.3,
-          actualY - r * 0.4,
-          r * 0.6
-        );
-        highlightGrad.addColorStop(0, "rgba(255,255,255,0.25)");
-        highlightGrad.addColorStop(0.3, "rgba(255,255,255,0.15)");
-        highlightGrad.addColorStop(1, "rgba(255,255,255,0)");
-
-        ctx.beginPath();
-        ctx.arc(actualX, actualY, Math.max(1, r - 1), 0, Math.PI * 2);
-        ctx.fillStyle = highlightGrad;
-        ctx.fill();
-
-        // Glowing text with neon effect
-        if (r > baseRadius * 0.3) {
-          const fontSize = Math.max(10, 18 * (r / baseRadius));
-          ctx.font = `bold ${fontSize}px 'Inter Tight', Inter, ui-sans-serif`;
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-
-          // Text glow
-          ctx.shadowColor = "#ffffff";
-          ctx.shadowBlur = 8;
-          ctx.fillStyle = "#ffffff";
-          ctx.fillText(String(value), actualX, actualY);
-
-          // Additional text glow
-          ctx.shadowBlur = 4;
-          ctx.fillStyle = "#f8fafc";
-          ctx.fillText(String(value), actualX, actualY);
-        }
-
-        ctx.restore();
       }
 
-      function drawParticles() {
-        for (const p of state.particles) {
-          if (p.life <= 0 || p.size <= 0) continue;
+      function drawParticles(): void {
+        for (let i = 0; i < particlePool.getCapacity(); i++) {
+          if (particlePool.life[i] <= 0 || particlePool.size[i] <= 0) continue;
+
+          const alpha = Math.max(
+            0,
+            particlePool.life[i] / particlePool.maxLife[i]
+          );
+          const color = spriteCache.getColor(particlePool.colorIndex[i]);
 
           ctx.save();
-          const alpha = Math.max(0, p.life / p.maxLife);
           ctx.globalAlpha = alpha;
-          ctx.shadowColor = p.color;
-          ctx.shadowBlur = p.size * 2;
-
+          ctx.shadowColor = color;
+          ctx.shadowBlur = particlePool.size[i] * 2;
           ctx.beginPath();
-          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-          ctx.fillStyle = p.color;
+          ctx.arc(
+            particlePool.x[i],
+            particlePool.y[i],
+            particlePool.size[i],
+            0,
+            Math.PI * 2
+          );
+          ctx.fillStyle = color;
           ctx.fill();
           ctx.restore();
         }
       }
 
-      function draw() {
+      function draw(): void {
         ctx.clearRect(0, 0, cfg.boardW, cfg.boardH);
 
-        // Preview circle
+        // Preview circle - only show when drop is available with animation
         if (!state.ended && !state.paused) {
-          const x = state.previewX;
-          const v = state.nextValue;
-          const r = cfg.getRadiusForValue(v);
-          // Use the same spawn Y logic as actual spawning
-          const y = cfg.spawnY;
-          const fill = colorForValue(v);
+          const now = performance.now();
+          const timeSinceLastDrop = now - state.lastDropTs;
+          const canDrop = timeSinceLastDrop >= cfg.dropCooldownMs;
 
-          ctx.save();
-          ctx.globalAlpha = 0.7;
-          ctx.shadowColor = fill;
-          ctx.shadowBlur = 16;
-          ctx.beginPath();
-          ctx.arc(x, y, r, 0, Math.PI * 2);
-          ctx.fillStyle = fill;
-          ctx.fill();
-          ctx.shadowBlur = 0;
-          ctx.lineWidth = 3;
-          ctx.strokeStyle = "rgba(255,255,255,.22)";
-          ctx.beginPath();
-          ctx.arc(x, y, r - 3, 0, Math.PI * 2);
-          ctx.stroke();
+          if (canDrop) {
+            // Animation for circle appearance
+            const animationDuration = 200; // 200ms animation
+            const timeSinceCanDrop = timeSinceLastDrop - cfg.dropCooldownMs;
+            const animationProgress = Math.min(
+              timeSinceCanDrop / animationDuration,
+              1
+            );
 
-          const pulse = 0.95 + 0.05 * Math.sin(performance.now() * 0.003);
-          ctx.fillStyle = "#0b0e15";
-          const fontSize = Math.max(10, 18 * (r / cfg.radius));
-          ctx.font = `bold ${fontSize * pulse}px Inter, ui-sans-serif`;
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.fillText(String(v), x, y);
-          ctx.restore();
+            // Easing function for smooth animation
+            const easeOutBack = (t: number) => {
+              const c1 = 1.70158;
+              const c3 = c1 + 1;
+              return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+            };
+
+            const scale = easeOutBack(animationProgress);
+            const alpha = 0.7 * animationProgress;
+
+            const x = state.previewX;
+            const v = state.nextValue;
+            const r = cfg.getRadiusForValue(v) * scale;
+            const y = cfg.spawnY;
+            const colorIndex = spriteCache.getColorIndex(v);
+            const fill = spriteCache.getColor(colorIndex);
+
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.shadowColor = fill;
+            ctx.shadowBlur = 16 * scale;
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fillStyle = fill;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.lineWidth = 3 * scale;
+            ctx.strokeStyle = "rgba(255,255,255,.22)";
+            ctx.beginPath();
+            ctx.arc(x, y, Math.max(1, r - 3 * scale), 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Text with animation
+            if (animationProgress > 0.5) {
+              // Show text after half animation
+              const textAlpha = (animationProgress - 0.5) * 2; // Fade in text
+              const pulse = 0.95 + 0.05 * Math.sin(performance.now() * 0.003);
+              ctx.globalAlpha = alpha * textAlpha;
+              ctx.fillStyle = "#0b0e15";
+              const fontSize = Math.max(10, 18 * (r / cfg.radius));
+              ctx.font = `bold ${fontSize * pulse}px Inter, ui-sans-serif`;
+              ctx.textAlign = "center";
+              ctx.textBaseline = "middle";
+              ctx.fillText(String(v), x, y);
+            }
+            ctx.restore();
+          }
         }
 
-        // All circles
+        // All circles using cached sprites
         for (const data of state.circles.values()) {
           drawCircle(
             data.body.position.x,
@@ -725,8 +1093,12 @@ export default function SuokaGame() {
         drawParticles();
       }
 
-      // Input handling
-      function updatePreviewFromClientX(clientX: number) {
+      // Unified pointer input handling
+      function updatePreviewFromClientX(clientX: number): void {
+        const now = performance.now();
+        if (now - state.previewUpdateTime < 16) return; // Throttle to ~60fps
+        state.previewUpdateTime = now;
+
         const rect = canvas.getBoundingClientRect();
         const x = (clientX - rect.left) * (cfg.boardW / rect.width);
         const previewRadius = cfg.getRadiusForValue(state.nextValue);
@@ -739,34 +1111,34 @@ export default function SuokaGame() {
       function isSpawnFree(
         x: number,
         y: number,
-        value: number = state.nextValue
-      ) {
+        value = state.nextValue
+      ): boolean {
         const spawnRadius = cfg.getRadiusForValue(value);
 
         for (const data of state.circles.values()) {
           const dx = x - data.body.position.x;
           const dy = y - data.body.position.y;
           const existingRadius = cfg.getRadiusForValue(data.value);
-          const minDistance = (spawnRadius + existingRadius) * 1.1; // Small buffer
+          const minDistance = (spawnRadius + existingRadius) * 1.1;
           if (Math.hypot(dx, dy) < minDistance) return false;
         }
 
-        if (y < spawnRadius || y > cfg.boardH - spawnRadius) return false;
-        if (x < spawnRadius || x > cfg.boardW - spawnRadius) return false;
-
-        return true;
+        return (
+          y >= spawnRadius &&
+          y <= cfg.boardH - spawnRadius &&
+          x >= spawnRadius &&
+          x <= cfg.boardW - spawnRadius
+        );
       }
 
-      function tryDrop() {
+      function tryDrop(): void {
         if (!state.running || state.ended || state.paused) return;
         const now = performance.now();
         if (now - state.lastDropTs < cfg.dropCooldownMs) return;
 
         const value = state.nextValue;
         const radius = cfg.getRadiusForValue(value);
-
         let x = state.previewX;
-        // Use the same spawn Y logic as preview and cfg
         let y = cfg.spawnY;
 
         if (!isSpawnFree(x, y, value)) {
@@ -774,8 +1146,8 @@ export default function SuokaGame() {
           let placed = false;
 
           for (let i = 1; i <= 6; i++) {
-            const xl = x - i * step,
-              xr = x + i * step;
+            const xl = x - i * step;
+            const xr = x + i * step;
             if (xl >= radius && isSpawnFree(xl, y, value)) {
               x = xl;
               placed = true;
@@ -789,7 +1161,6 @@ export default function SuokaGame() {
           }
 
           if (!placed) {
-            // Use the same spawn Y as configured, don't go higher
             const safeY = cfg.spawnY;
             for (let i = 0; i <= 6; i++) {
               const testX =
@@ -817,69 +1188,13 @@ export default function SuokaGame() {
         const C = createCircle(x, y, value);
         if (C) {
           state.nextValue = rollValue();
-          setGameState((prev) => ({ ...prev, nextValue: state.nextValue }));
+          store.setState({ nextValue: state.nextValue });
           state.lastDropTs = now;
         }
       }
 
       // Game control
-      function checkDangerLine() {
-        const now = performance.now();
-
-        // Note: danger line detection with triple safety checks
-
-        for (const data of state.circles.values()) {
-          const circleRadius = cfg.getRadiusForValue(data.value);
-          const top = data.body.position.y - circleRadius;
-          const age = now - data.bornAt;
-
-          // Check if circle crosses danger line
-
-          if (age > cfg.gracePeriodMs && top < cfg.dangerLineY) {
-            endGame("Danger line crossed.");
-            return;
-          }
-
-          // Additional safety check: circle center crossed danger line (more strict)
-          if (
-            age > cfg.gracePeriodMs &&
-            data.body.position.y < cfg.dangerLineY
-          ) {
-            console.log(
-              `GAME OVER (strict): Circle ${
-                data.value
-              } center crossed danger line! center=${data.body.position.y.toFixed(
-                1
-              )}, danger=${cfg.dangerLineY}`
-            );
-            endGame("Danger line crossed.");
-            return;
-          }
-        }
-
-        // Emergency check: if there are many circles and some are clearly above danger line
-        if (state.circles.size > 12) {
-          let emergencyCount = 0;
-          for (const data of state.circles.values()) {
-            const age = now - data.bornAt;
-            if (
-              age > cfg.gracePeriodMs &&
-              data.body.position.y < cfg.dangerLineY + 30
-            ) {
-              emergencyCount++;
-            }
-          }
-          if (emergencyCount > 6) {
-            console.log(
-              `EMERGENCY GAME OVER: ${emergencyCount} circles above danger zone`
-            );
-            endGame("Too many circles stacked.");
-            return;
-          }
-        }
-      }
-
-      function endGame(reason: string) {
+      function endGame(reason: string): void {
         if (state.ended) return;
 
         state.ended = true;
@@ -887,16 +1202,15 @@ export default function SuokaGame() {
         state.endReason = reason;
         engine.timing.timeScale = 0;
 
-        setGameState((prev) => ({
-          ...prev,
+        store.setState({
           ended: true,
           running: false,
           endReason: reason,
-        }));
+        });
         setShowModal(true);
       }
 
-      function restart() {
+      function restart(): void {
         engine.timing.timeScale = 0;
         for (const data of Array.from(state.circles.values())) {
           try {
@@ -905,8 +1219,10 @@ export default function SuokaGame() {
         }
         state.circles.clear();
         state.mergingCircles.clear();
-        state.particles.length = 0;
         state.animations.clear();
+        state.mergeQueue.length = 0;
+        particlePool.clear();
+        stepRunner.reset();
 
         state.score = 0;
         state.nextValue = rollValue();
@@ -917,8 +1233,9 @@ export default function SuokaGame() {
         state.lastDropTs = 0;
         state.previewX = cfg.boardW / 2;
         state.nextLocalId = 1;
+        state.highestCircleTop = cfg.boardH;
 
-        setGameState({
+        store.setState({
           score: 0,
           best: state.best,
           nextValue: state.nextValue,
@@ -935,107 +1252,76 @@ export default function SuokaGame() {
         showToastMessage("New game started");
       }
 
-      function togglePause() {
+      function togglePause(): void {
         if (state.ended) return;
         state.paused = !state.paused;
         engine.timing.timeScale = state.paused ? 0 : 1;
 
-        setGameState((prev) => ({ ...prev, paused: state.paused }));
+        store.setState({ paused: state.paused });
         showToastMessage(state.paused ? "Paused" : "Resumed");
       }
 
-      // Enhanced event listeners for mobile
-      let lastTouchTime = 0;
-      let touchStartX = 0;
-      let touchStartY = 0;
+      // Unified pointer events
+      let isPointerDown = false;
+      let pointerStartX = 0;
+      let pointerStartY = 0;
 
-      // Prevent zoom on double tap
-      canvas.addEventListener(
-        "touchstart",
-        (e) => {
-          e.preventDefault();
-
-          const now = Date.now();
-          const timeSinceLastTouch = now - lastTouchTime;
-          lastTouchTime = now;
-
-          const t = e.touches[0];
-          if (!t) return;
-
-          touchStartX = t.clientX;
-          touchStartY = t.clientY;
-
-          // Prevent double tap zoom
-          if (timeSinceLastTouch < 300) {
-            e.preventDefault();
-            return;
-          }
-
-          if (t) updatePreviewFromClientX(t.clientX);
-        },
-        { passive: false }
-      );
-
-      canvas.addEventListener(
-        "touchmove",
-        (e) => {
-          e.preventDefault();
-          if (state.ended || state.paused) return;
-
-          const t = e.touches[0];
-          if (!t) return;
-
-          // Only update preview if moving horizontally
-          const deltaX = Math.abs(t.clientX - touchStartX);
-          const deltaY = Math.abs(t.clientY - touchStartY);
-
-          if (deltaX > deltaY || deltaY < 20) {
-            updatePreviewFromClientX(t.clientX);
-          }
-        },
-        { passive: false }
-      );
-
-      canvas.addEventListener(
-        "touchend",
-        (e) => {
-          e.preventDefault();
-
-          const t = e.changedTouches[0];
-          if (!t) return;
-
-          // Check if it's a tap (not a drag)
-          const deltaX = Math.abs(t.clientX - touchStartX);
-          const deltaY = Math.abs(t.clientY - touchStartY);
-
-          if (deltaX < 10 && deltaY < 10) {
-            updatePreviewFromClientX(t.clientX);
-            tryDrop();
-          }
-        },
-        { passive: false }
-      );
-
-      // Mouse events for desktop
-      canvas.addEventListener("mousemove", (e) => {
-        if (state.ended || state.paused) return;
-        // Only respond to mouse if not on touch device
-        if ("ontouchstart" in window) return;
+      function handlePointerStart(e: PointerEvent): void {
+        e.preventDefault();
+        isPointerDown = true;
+        pointerStartX = e.clientX;
+        pointerStartY = e.clientY;
         updatePreviewFromClientX(e.clientX);
+      }
+
+      function handlePointerMove(e: PointerEvent): void {
+        if (!isPointerDown || state.ended || state.paused) return;
+        e.preventDefault();
+
+        const deltaX = Math.abs(e.clientX - pointerStartX);
+        const deltaY = Math.abs(e.clientY - pointerStartY);
+
+        if (deltaX > deltaY || deltaY < 20) {
+          updatePreviewFromClientX(e.clientX);
+        }
+      }
+
+      function handlePointerEnd(e: PointerEvent): void {
+        if (!isPointerDown) return;
+        e.preventDefault();
+        isPointerDown = false;
+
+        const deltaX = Math.abs(e.clientX - pointerStartX);
+        const deltaY = Math.abs(e.clientY - pointerStartY);
+
+        if (deltaX < 10 && deltaY < 10) {
+          updatePreviewFromClientX(e.clientX);
+          tryDrop();
+        }
+      }
+
+      function handlePointerCancel(e: PointerEvent): void {
+        isPointerDown = false;
+      }
+
+      // Add pointer event listeners
+      canvas.addEventListener("pointerdown", handlePointerStart, {
+        passive: false,
+      });
+      canvas.addEventListener("pointermove", handlePointerMove, {
+        passive: false,
+      });
+      canvas.addEventListener("pointerup", handlePointerEnd, {
+        passive: false,
+      });
+      canvas.addEventListener("pointercancel", handlePointerCancel, {
+        passive: false,
       });
 
-      canvas.addEventListener("click", (e) => {
-        // Only respond to mouse if not on touch device
-        if ("ontouchstart" in window) return;
-        updatePreviewFromClientX(e.clientX);
-        tryDrop();
-      });
-
-      // Handle window resize
-      function handleResize() {
+      // Resize handling with ResizeObserver
+      function handleResize(): void {
         const newDimensions = calculateBoardDimensions();
 
-        // Update dimensions variables for getRadiusForValue function
         dynamicBoardW = newDimensions.dynamicBoardW;
         dynamicBoardH = newDimensions.dynamicBoardH;
         isMobile = newDimensions.isMobile;
@@ -1043,7 +1329,6 @@ export default function SuokaGame() {
         cfg.boardW = newDimensions.dynamicBoardW;
         cfg.boardH = newDimensions.dynamicBoardH;
 
-        // Update canvas size
         const newDpr = newDimensions.isMobile
           ? Math.max(1, Math.min(1.5, window.devicePixelRatio || 1))
           : Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -1054,15 +1339,16 @@ export default function SuokaGame() {
         canvas.style.height = cfg.boardH + "px";
         ctx.setTransform(newDpr, 0, 0, newDpr, 0, 0);
 
-        // Update Matter.js world boundaries
+        // Clear sprite cache on resize
+        spriteCache.clear();
+
+        // Update walls
         if (walls) {
           World.remove(engine.world, walls);
         }
 
-        // Use the same wall logic as initial creation
         const WALL_THICK_RESIZE = cfg.radius * 2;
         walls = [
-          // Left wall
           Bodies.rectangle(
             -WALL_THICK_RESIZE / 2,
             cfg.boardH / 2,
@@ -1074,7 +1360,6 @@ export default function SuokaGame() {
               render: { visible: false },
             }
           ),
-          // Right wall
           Bodies.rectangle(
             cfg.boardW + WALL_THICK_RESIZE / 2,
             cfg.boardH / 2,
@@ -1086,7 +1371,6 @@ export default function SuokaGame() {
               render: { visible: false },
             }
           ),
-          // Bottom wall
           Bodies.rectangle(
             cfg.boardW / 2,
             cfg.boardH + WALL_THICK_RESIZE / 2,
@@ -1098,7 +1382,6 @@ export default function SuokaGame() {
               render: { visible: false },
             }
           ),
-          // Top wall
           Bodies.rectangle(
             cfg.boardW / 2,
             -WALL_THICK_RESIZE,
@@ -1114,24 +1397,25 @@ export default function SuokaGame() {
         World.add(engine.world, walls);
       }
 
-      // Add resize listener and store reference for cleanup
-      if (!window._suokaListeners) {
-        window._suokaListeners = {};
-      }
-      window._suokaListeners.handleResize = handleResize;
-      window.addEventListener("resize", handleResize);
+      resizeObserver = new ResizeObserver(handleResize);
+      resizeObserver.observe(stageBoard);
 
-      // Main loop
-      function step() {
-        if (state.running && !state.paused) {
-          Engine.update(engine, 1000 / 60);
-          checkDangerLine();
-        }
+      // Fixed timestep game loop
+      function gameStep(): void {
+        stepRunner.update(performance.now(), (fixedDt) => {
+          if (state.running && !state.paused) {
+            Engine.update(engine, fixedDt);
+            processMergeQueue(); // Process merges after physics
+            updateHighestCircle();
+            checkDangerLine();
+          }
+        });
 
         updateParticles();
         updateAnimations();
         draw();
-        requestAnimationFrame(step);
+
+        rafId = requestAnimationFrame(gameStep);
       }
 
       // Store game functions for external access
@@ -1139,25 +1423,56 @@ export default function SuokaGame() {
         restart,
         togglePause,
         state,
+        cleanup: () => {
+          if (rafId) cancelAnimationFrame(rafId);
+          if (resizeObserver) resizeObserver.disconnect();
+
+          canvas.removeEventListener("pointerdown", handlePointerStart);
+          canvas.removeEventListener("pointermove", handlePointerMove);
+          canvas.removeEventListener("pointerup", handlePointerEnd);
+          canvas.removeEventListener("pointercancel", handlePointerCancel);
+
+          Events.off(engine, "collisionStart");
+          World.clear(engine.world, false);
+          Engine.clear(engine);
+
+          particlePool.clear();
+          spriteCache.clear();
+
+          state.circles.clear();
+          state.mergingCircles.clear();
+          state.animations.clear();
+          state.mergeQueue.length = 0;
+        },
       };
 
       restart();
-      step();
+      gameStep();
     };
 
     initGame();
 
     // Cleanup function
     return () => {
-      // Cleanup will be handled by removing the listeners if they exist
-      if (typeof window !== "undefined") {
-        const listeners = window._suokaListeners;
-        if (listeners && listeners.handleResize) {
-          window.removeEventListener("resize", listeners.handleResize);
-        }
+      if (gameInstanceRef.current?.cleanup) {
+        gameInstanceRef.current.cleanup();
       }
     };
   }, []);
+
+  const formatNumber = (num: number): string => {
+    if (num < 1000) {
+      return num.toString();
+    }
+
+    const thousands = num / 1000;
+
+    if (thousands % 1 === 0) {
+      return `${Math.floor(thousands)}k`;
+    } else {
+      return `${thousands.toFixed(1).replace(/\.?0+$/, "")}k`;
+    }
+  };
 
   const showToastMessage = (message: string) => {
     setToastMessage(message);
@@ -1189,11 +1504,11 @@ export default function SuokaGame() {
             <div className="hud__group">
               <div className="hud__chip">
                 <span>Score</span>
-                <strong>{gameState.score}</strong>
+                <strong>{formatNumber(gameState.score)}</strong>
               </div>
               <div className="hud__chip">
                 <span>Best</span>
-                <strong>{gameState.best}</strong>
+                <strong>{formatNumber(gameState.best)}</strong>
               </div>
             </div>
             <div className="hud__actions">
@@ -1214,7 +1529,11 @@ export default function SuokaGame() {
             <div className="danger" aria-hidden="true">
               <span>DANGER</span>
             </div>
-            <canvas ref={canvasRef} aria-label="SUOKA board" />
+            <canvas
+              ref={canvasRef}
+              aria-label="SUOKA board"
+              style={{ touchAction: "none" }}
+            />
           </div>
         </section>
 
@@ -1234,7 +1553,7 @@ export default function SuokaGame() {
               <h2>Game Over</h2>
               <p>{gameState.endReason}</p>
               <p>
-                <strong>Final score:</strong> {gameState.score}
+                <strong>Final score:</strong> {formatNumber(gameState.score)}
               </p>
               <button onClick={handleRestart} className="btn btn--light">
                 Play Again
@@ -1246,3 +1565,10 @@ export default function SuokaGame() {
     </div>
   );
 }
+
+/*
+CSS Note: Add the following to your global CSS if not already present:
+canvas {
+  touch-action: none;
+}
+*/
