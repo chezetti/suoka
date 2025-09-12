@@ -868,11 +868,11 @@ export default function SuokaGame() {
           A.value
         );
 
-        // Store merge animations
+        // Store merge animations with shorter, smoother duration
         const now = performance.now();
         state.animations.set(A.body.id, {
           startTime: now,
-          duration: 300,
+          duration: 200, // Reduced from 300ms for snappier feel
           type: "merge",
           targetX: x,
           targetY: y,
@@ -881,7 +881,7 @@ export default function SuokaGame() {
         });
         state.animations.set(B.body.id, {
           startTime: now,
-          duration: 300,
+          duration: 200, // Reduced from 300ms for snappier feel
           type: "merge",
           targetX: x,
           targetY: y,
@@ -919,10 +919,10 @@ export default function SuokaGame() {
             });
             Body.applyForce(C.body, C.body.position, { x: 0, y: 0.005 });
           }
-        }, 300);
+        }, 150); // Reduced from 300ms to sync with merge animation
       }
 
-      // Particle system
+      // Particle system - more controlled animation
       function createMergeExplosion(
         x: number,
         y: number,
@@ -930,19 +930,38 @@ export default function SuokaGame() {
         newColorIndex: number,
         circleValue = 2
       ): void {
-        const particleCount = 8 + Math.floor(Math.random() * 4);
         const circleRadius = cfg.getRadiusForValue(circleValue);
-        const sizeMultiplier = circleRadius / cfg.radius;
+        const sizeMultiplier = Math.min(2, circleRadius / cfg.radius); // Cap multiplier
+
+        // More controlled particle count based on circle size
+        const particleCount = Math.max(
+          6,
+          Math.min(10, 6 + Math.floor(sizeMultiplier * 2))
+        );
 
         for (let i = 0; i < particleCount; i++) {
           const particleIndex = particlePool.acquire();
           if (particleIndex === -1) break; // Pool exhausted
 
-          const angle =
-            (Math.PI * 2 * i) / particleCount + (Math.random() - 0.5) * 0.5;
-          const speed = (80 + Math.random() * 40) * sizeMultiplier;
-          const size = (3 + Math.random() * 4) * sizeMultiplier;
-          const life = 600 + Math.random() * 300;
+          // More evenly distributed angles with less randomness
+          const baseAngle = (Math.PI * 2 * i) / particleCount;
+          const angleVariation = (Math.random() - 0.5) * 0.3; // Reduced from 0.5
+          const angle = baseAngle + angleVariation;
+
+          // More controlled speed range
+          const baseSpeed = 60 * sizeMultiplier;
+          const speedVariation = 20 + Math.random() * 20; // Reduced variation
+          const speed = baseSpeed + speedVariation;
+
+          // More consistent particle size
+          const baseSize = 2.5 * sizeMultiplier;
+          const sizeVariation = 1 + Math.random() * 1.5; // Reduced variation
+          const size = baseSize + sizeVariation;
+
+          // More consistent lifetime
+          const baseLife = 500;
+          const lifeVariation = Math.random() * 200; // Reduced from 300
+          const life = baseLife + lifeVariation;
 
           particlePool.x[particleIndex] = x;
           particlePool.y[particleIndex] = y;
@@ -953,8 +972,10 @@ export default function SuokaGame() {
           particlePool.life[particleIndex] = life;
           particlePool.maxLife[particleIndex] = life;
           particlePool.startTime[particleIndex] = performance.now();
+
+          // More balanced color distribution
           particlePool.colorIndex[particleIndex] =
-            Math.random() > 0.5 ? oldColorIndex : newColorIndex;
+            i % 2 === 0 ? oldColorIndex : newColorIndex;
         }
       }
 
@@ -989,23 +1010,30 @@ export default function SuokaGame() {
         }
 
         // Second pass: update active particles in batch
-        const gravity = 200;
-        const damping = 0.98;
+        const gravity = 150; // Reduced gravity for smoother motion
+        const damping = 0.985; // Slightly less damping for better flow
 
         for (const i of activeParticles) {
-          // Physics update
+          // Physics update with smoother motion
           particlePool.x[i] += particlePool.vx[i] * dt;
           particlePool.y[i] += particlePool.vy[i] * dt;
           particlePool.vy[i] += gravity * dt;
-          particlePool.vx[i] *= damping;
-          particlePool.vy[i] *= damping;
 
-          // Life update
+          // Progressive damping - less at start, more at end
           const elapsed = now - particlePool.startTime[i];
+          const lifeProgress = elapsed / particlePool.maxLife[i];
+          const dynamicDamping = damping + (1 - damping) * lifeProgress * 0.3;
+
+          particlePool.vx[i] *= dynamicDamping;
+          particlePool.vy[i] *= dynamicDamping;
+
+          // Life update with smoother scaling
           const lifeRatio = elapsed / particlePool.maxLife[i];
           particlePool.life[i] = particlePool.maxLife[i] * (1 - lifeRatio);
-          particlePool.size[i] =
-            particlePool.maxSize[i] * (1 - lifeRatio * 0.8);
+
+          // Smoother size transition with easing
+          const sizeEasing = 1 - Math.pow(lifeRatio, 1.5); // Ease-out curve
+          particlePool.size[i] = particlePool.maxSize[i] * sizeEasing;
         }
       }
 
@@ -1022,7 +1050,11 @@ export default function SuokaGame() {
           }
 
           const progress = elapsed / anim.duration;
-          const eased = 1 - Math.pow(1 - progress, 3);
+          // Better easing curve for smoother merge animation
+          const eased =
+            progress < 0.5
+              ? 4 * progress * progress * progress
+              : 1 - Math.pow(-2 * progress + 2, 3) / 2;
 
           if (anim.type === "merge") {
             const data = state.circles.get(bodyId);
