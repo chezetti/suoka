@@ -286,36 +286,99 @@ class SpriteCache {
   }
 }
 
-// Fixed timestep runner
-class FixedStepRunner {
+// High-performance adaptive timestep runner for 144+ FPS
+class AdaptiveStepRunner {
   private accumulator = 0;
   private lastTime = 0;
-  private readonly fixedDt = 1000 / 60; // 60 FPS physics
-  private readonly maxFrameTime = 250; // Cap long frames
+  private targetFPS = 144;
+  private readonly minDt = 1000 / 240; // Max 240 FPS physics
+  private readonly maxDt = 1000 / 30; // Min 30 FPS fallback
+  private readonly maxFrameTime = 100; // Reduced frame cap for responsiveness
+  private frameCount = 0;
+  private fpsCheckTime = 0;
+  private currentFPS = 60;
+
+  constructor() {
+    // Detect monitor refresh rate
+    this.detectRefreshRate();
+  }
+
+  private detectRefreshRate(): void {
+    // Try to detect high refresh rate displays
+    const startTime = performance.now();
+    let frameCount = 0;
+
+    const detect = () => {
+      frameCount++;
+      if (frameCount < 10) {
+        requestAnimationFrame(detect);
+      } else {
+        const elapsed = performance.now() - startTime;
+        const detectedFPS = Math.round((frameCount * 1000) / elapsed);
+
+        // Set target based on detected refresh rate
+        if (detectedFPS >= 120) {
+          this.targetFPS = Math.min(detectedFPS, 240); // Cap at 240 FPS
+        } else {
+          this.targetFPS = 60;
+        }
+      }
+    };
+
+    requestAnimationFrame(detect);
+  }
 
   update(currentTime: number, updateFn: (dt: number) => void): void {
     if (this.lastTime === 0) {
       this.lastTime = currentTime;
+      this.fpsCheckTime = currentTime;
       return;
     }
 
     let frameTime = currentTime - this.lastTime;
     this.lastTime = currentTime;
 
-    // Clamp frame time to prevent spiral of death
+    // Track FPS for adaptive optimization
+    this.frameCount++;
+    if (currentTime - this.fpsCheckTime >= 1000) {
+      this.currentFPS = this.frameCount;
+      this.frameCount = 0;
+      this.fpsCheckTime = currentTime;
+
+      // Auto-adjust target based on performance
+      if (this.currentFPS < this.targetFPS * 0.9) {
+        this.targetFPS = Math.max(60, this.targetFPS * 0.95);
+      }
+    }
+
+    // Adaptive timestep based on target FPS
+    const adaptiveDt = 1000 / this.targetFPS;
+
+    // Clamp frame time
     frameTime = Math.min(frameTime, this.maxFrameTime);
     this.accumulator += frameTime;
 
-    // Process fixed timesteps
-    while (this.accumulator >= this.fixedDt) {
-      updateFn(this.fixedDt);
-      this.accumulator -= this.fixedDt;
+    // Process adaptive timesteps
+    while (this.accumulator >= adaptiveDt) {
+      const dt = Math.max(this.minDt, Math.min(this.maxDt, adaptiveDt));
+      updateFn(dt);
+      this.accumulator -= adaptiveDt;
     }
+  }
+
+  getCurrentFPS(): number {
+    return this.currentFPS;
+  }
+
+  getTargetFPS(): number {
+    return this.targetFPS;
   }
 
   reset(): void {
     this.accumulator = 0;
     this.lastTime = 0;
+    this.frameCount = 0;
+    this.fpsCheckTime = 0;
   }
 }
 
@@ -377,19 +440,31 @@ export default function SuokaGame() {
     });
   }
 
-  const gameState = useSyncExternalStore(
-    storeRef.current.subscribe.bind(storeRef.current),
-    storeRef.current.getState.bind(storeRef.current),
-    () => ({
-      score: 0,
-      best: 0,
-      nextValue: 2,
-      running: false,
-      paused: false,
-      ended: false,
-      endReason: "",
-    })
-  );
+  const [gameState, setGameState] = useState<GameState>({
+    score: 0,
+    best: 0,
+    nextValue: 2,
+    running: false,
+    paused: false,
+    ended: false,
+    endReason: "",
+  });
+
+  // Subscribe to store changes
+  useEffect(() => {
+    if (!storeRef.current) return;
+
+    const unsubscribe = storeRef.current.subscribe(() => {
+      if (storeRef.current) {
+        setGameState(storeRef.current.getState());
+      }
+    });
+
+    // Set initial state
+    setGameState(storeRef.current.getState());
+
+    return unsubscribe;
+  }, []);
 
   const [showModal, setShowModal] = useState(false);
   const [showToast, setShowToast] = useState(false);
@@ -419,7 +494,7 @@ export default function SuokaGame() {
       // Initialize systems
       const particlePool = new ParticlePool(300);
       const spriteCache = new SpriteCache();
-      const stepRunner = new FixedStepRunner();
+      const stepRunner = new AdaptiveStepRunner();
       let resizeObserver: ResizeObserver | null = null;
       let rafId = 0;
       let lastBestSave = 0;
@@ -526,31 +601,70 @@ export default function SuokaGame() {
         scoreMul: 1,
       };
 
-      // Canvas setup with mobile optimization
+      // High-performance canvas setup for 144+ FPS
       const baseDpr = window.devicePixelRatio || 1;
-      const dpr = isMobile
-        ? Math.max(1, Math.min(1.5, baseDpr))
-        : Math.max(1, Math.min(2, baseDpr));
+      const targetFPS = stepRunner.getTargetFPS();
+
+      // Adaptive DPR based on target FPS for performance
+      let dpr: number;
+      if (targetFPS >= 144) {
+        // Reduce DPR for ultra-high refresh rates
+        dpr = isMobile ? Math.min(1.2, baseDpr) : Math.min(1.5, baseDpr);
+      } else if (targetFPS >= 120) {
+        dpr = isMobile ? Math.min(1.3, baseDpr) : Math.min(1.8, baseDpr);
+      } else {
+        dpr = isMobile ? Math.min(1.5, baseDpr) : Math.min(2, baseDpr);
+      }
 
       canvas.width = cfg.boardW * dpr;
       canvas.height = cfg.boardH * dpr;
       canvas.style.width = cfg.boardW + "px";
       canvas.style.height = cfg.boardH + "px";
+
+      // GPU acceleration hints
+      canvas.style.transform = "translate3d(0,0,0)";
+      canvas.style.willChange = "transform";
+
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      if (isMobile) {
+      // Optimized canvas settings for high FPS
+      if (targetFPS >= 120) {
+        ctx.imageSmoothingEnabled = false; // Disable for ultra-high FPS
+      } else if (isMobile) {
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "medium";
+      } else {
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+      }
+
+      // Enable hardware acceleration hints
+      const contextAttributes = (ctx as any).getContextAttributes?.();
+      if (contextAttributes) {
+        contextAttributes.willReadFrequently = true;
+        contextAttributes.alpha = false; // Disable alpha for better performance
       }
 
       const rollValue = () =>
         cfg.valueDist[Math.floor(Math.random() * cfg.valueDist.length)];
 
-      // Physics engine
-      const engine = Engine.create({ enableSleeping: true });
+      // High-performance physics engine setup
+      const engine = Engine.create({
+        enableSleeping: true,
+      });
       engine.world.gravity.y = cfg.gravity;
-      engine.velocityIterations = 4;
-      engine.positionIterations = 4;
+
+      // Adaptive physics quality based on target FPS
+      if (targetFPS >= 144) {
+        engine.velocityIterations = 3; // Reduced for ultra-high FPS
+        engine.positionIterations = 3;
+      } else if (targetFPS >= 120) {
+        engine.velocityIterations = 4;
+        engine.positionIterations = 4;
+      } else {
+        engine.velocityIterations = 6; // Higher quality for standard FPS
+        engine.positionIterations = 6;
+      }
 
       // Walls
       const WALL_THICK = cfg.radius * 2;
@@ -844,10 +958,24 @@ export default function SuokaGame() {
         }
       }
 
+      // High-performance particle update with adaptive timestep
+      let lastParticleUpdate = 0;
       function updateParticles(): void {
         const now = performance.now();
-        const dt = 0.016; // Fixed timestep
+        const targetFPS = stepRunner.getTargetFPS();
 
+        // Adaptive timestep for particles based on FPS
+        const particleUpdateInterval =
+          targetFPS >= 144 ? 8 : targetFPS >= 120 ? 12 : 16;
+        if (now - lastParticleUpdate < particleUpdateInterval) return;
+
+        const dt = (now - lastParticleUpdate) / 1000; // Convert to seconds
+        lastParticleUpdate = now;
+
+        // Batch process particles for better cache performance
+        const activeParticles: number[] = [];
+
+        // First pass: collect active particles and handle expired ones
         for (let i = 0; i < particlePool.getCapacity(); i++) {
           if (particlePool.life[i] <= 0) continue;
 
@@ -857,12 +985,23 @@ export default function SuokaGame() {
             continue;
           }
 
+          activeParticles.push(i);
+        }
+
+        // Second pass: update active particles in batch
+        const gravity = 200;
+        const damping = 0.98;
+
+        for (const i of activeParticles) {
+          // Physics update
           particlePool.x[i] += particlePool.vx[i] * dt;
           particlePool.y[i] += particlePool.vy[i] * dt;
-          particlePool.vy[i] += 200 * dt;
-          particlePool.vx[i] *= 0.98;
-          particlePool.vy[i] *= 0.98;
+          particlePool.vy[i] += gravity * dt;
+          particlePool.vx[i] *= damping;
+          particlePool.vy[i] *= damping;
 
+          // Life update
+          const elapsed = now - particlePool.startTime[i];
           const lifeRatio = elapsed / particlePool.maxLife[i];
           particlePool.life[i] = particlePool.maxLife[i] * (1 - lifeRatio);
           particlePool.size[i] =
@@ -985,7 +1124,13 @@ export default function SuokaGame() {
         );
       }
 
+      // Optimized particle rendering with batching
       function drawParticles(): void {
+        const targetFPS = stepRunner.getTargetFPS();
+
+        // Reduce particle rendering complexity at high FPS
+        const useSimpleRendering = targetFPS >= 144;
+
         for (let i = 0; i < particlePool.getCapacity(); i++) {
           if (particlePool.life[i] <= 0 || particlePool.size[i] <= 0) continue;
 
@@ -995,93 +1140,196 @@ export default function SuokaGame() {
           );
           const color = spriteCache.getColor(particlePool.colorIndex[i]);
 
-          ctx.save();
-          ctx.globalAlpha = alpha;
-          ctx.shadowColor = color;
-          ctx.shadowBlur = particlePool.size[i] * 2;
-          ctx.beginPath();
-          ctx.arc(
-            particlePool.x[i],
-            particlePool.y[i],
-            particlePool.size[i],
-            0,
-            Math.PI * 2
-          );
-          ctx.fillStyle = color;
-          ctx.fill();
-          ctx.restore();
-        }
-      }
-
-      function draw(): void {
-        ctx.clearRect(0, 0, cfg.boardW, cfg.boardH);
-
-        // Preview circle - only show when drop is available with animation
-        if (!state.ended && !state.paused) {
-          const now = performance.now();
-          const timeSinceLastDrop = now - state.lastDropTs;
-          const canDrop = timeSinceLastDrop >= cfg.dropCooldownMs;
-
-          if (canDrop) {
-            // Animation for circle appearance
-            const animationDuration = 200; // 200ms animation
-            const timeSinceCanDrop = timeSinceLastDrop - cfg.dropCooldownMs;
-            const animationProgress = Math.min(
-              timeSinceCanDrop / animationDuration,
-              1
+          if (useSimpleRendering) {
+            // Simplified rendering for ultra-high FPS
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(
+              particlePool.x[i],
+              particlePool.y[i],
+              particlePool.size[i],
+              0,
+              Math.PI * 2
             );
-
-            // Easing function for smooth animation
-            const easeOutBack = (t: number) => {
-              const c1 = 1.70158;
-              const c3 = c1 + 1;
-              return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-            };
-
-            const scale = easeOutBack(animationProgress);
-            const alpha = 0.7 * animationProgress;
-
-            const x = state.previewX;
-            const v = state.nextValue;
-            const r = cfg.getRadiusForValue(v) * scale;
-            const y = cfg.spawnY;
-            const colorIndex = spriteCache.getColorIndex(v);
-            const fill = spriteCache.getColor(colorIndex);
-
+            ctx.fill();
+          } else {
+            // Full quality rendering for standard FPS
             ctx.save();
             ctx.globalAlpha = alpha;
-            ctx.shadowColor = fill;
-            ctx.shadowBlur = 16 * scale;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = particlePool.size[i] * 2;
             ctx.beginPath();
-            ctx.arc(x, y, r, 0, Math.PI * 2);
-            ctx.fillStyle = fill;
+            ctx.arc(
+              particlePool.x[i],
+              particlePool.y[i],
+              particlePool.size[i],
+              0,
+              Math.PI * 2
+            );
+            ctx.fillStyle = color;
             ctx.fill();
-            ctx.shadowBlur = 0;
-            ctx.lineWidth = 3 * scale;
-            ctx.strokeStyle = "rgba(255,255,255,.22)";
-            ctx.beginPath();
-            ctx.arc(x, y, Math.max(1, r - 3 * scale), 0, Math.PI * 2);
-            ctx.stroke();
-
-            // Text with animation
-            if (animationProgress > 0.5) {
-              // Show text after half animation
-              const textAlpha = (animationProgress - 0.5) * 2; // Fade in text
-              const pulse = 0.95 + 0.05 * Math.sin(performance.now() * 0.003);
-              ctx.globalAlpha = alpha * textAlpha;
-              ctx.fillStyle = "#0b0e15";
-              const fontSize = Math.max(10, 18 * (r / cfg.radius));
-              ctx.font = `bold ${fontSize * pulse}px Inter, ui-sans-serif`;
-              ctx.textAlign = "center";
-              ctx.textBaseline = "middle";
-              ctx.fillText(String(v), x, y);
-            }
             ctx.restore();
           }
         }
 
-        // All circles using cached sprites
-        for (const data of state.circles.values()) {
+        // Reset global alpha if using simple rendering
+        if (useSimpleRendering) {
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      // Performance monitoring and FPS display
+      const DEBUG_MODE = false; // Set to true for performance monitoring
+      function drawPerformanceInfo(): void {
+        if (!DEBUG_MODE) return;
+
+        const currentFPS = stepRunner.getCurrentFPS();
+        const targetFPS = stepRunner.getTargetFPS();
+
+        ctx.save();
+        ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+        ctx.fillRect(10, 10, 200, 80);
+
+        ctx.fillStyle = "#00ff00";
+        ctx.font = "14px monospace";
+        ctx.fillText(`FPS: ${currentFPS}/${targetFPS}`, 20, 30);
+        ctx.fillText(`Circles: ${state.circles.size}`, 20, 50);
+        ctx.fillText(`Particles: ${particlePool.getActiveCount()}`, 20, 70);
+        ctx.fillText(`Sprites: ${spriteCache.size()}`, 20, 90);
+        ctx.restore();
+      }
+
+      // Optimized draw function for high FPS
+      let lastDrawTime = 0;
+      let frameSkipCounter = 0;
+      const targetFrameTime = 1000 / stepRunner.getTargetFPS();
+
+      function draw(): void {
+        const now = performance.now();
+
+        // Adaptive frame skipping for consistent performance
+        if (
+          now - lastDrawTime < targetFrameTime * 0.8 &&
+          stepRunner.getCurrentFPS() > stepRunner.getTargetFPS() * 1.1
+        ) {
+          frameSkipCounter++;
+          if (frameSkipCounter < 2) return; // Skip max 2 frames
+        }
+
+        frameSkipCounter = 0;
+        lastDrawTime = now;
+
+        // Use willReadFrequently hint for better performance
+        ctx.clearRect(0, 0, cfg.boardW, cfg.boardH);
+
+        // Preview circle - optimized with reduced operations
+        if (!state.ended && !state.paused) {
+          const timeSinceLastDrop = now - state.lastDropTs;
+          const canDrop = timeSinceLastDrop >= cfg.dropCooldownMs;
+
+          if (canDrop) {
+            drawOptimizedPreview(now, timeSinceLastDrop);
+          }
+        }
+
+        // Danger line is handled by CSS (.danger::before and ::after)
+
+        // Batch circle rendering for better performance
+        drawAllCircles();
+        drawParticles();
+        drawPerformanceInfo();
+      }
+
+      // Optimized preview drawing with cached calculations
+      const easeOutBackCache = new Map<number, number>();
+      function getEaseOutBack(t: number): number {
+        const key = Math.round(t * 100);
+        if (easeOutBackCache.has(key)) {
+          return easeOutBackCache.get(key)!;
+        }
+
+        const c1 = 1.70158;
+        const c3 = c1 + 1;
+        const result = 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+        easeOutBackCache.set(key, result);
+        return result;
+      }
+
+      function drawOptimizedPreview(
+        now: number,
+        timeSinceLastDrop: number
+      ): void {
+        const animationDuration = 200;
+        const timeSinceCanDrop = timeSinceLastDrop - cfg.dropCooldownMs;
+        const animationProgress = Math.min(
+          timeSinceCanDrop / animationDuration,
+          1
+        );
+
+        const scale = getEaseOutBack(animationProgress);
+        const alpha = 0.7 * animationProgress;
+
+        const x = state.previewX;
+        const v = state.nextValue;
+        const r = cfg.getRadiusForValue(v) * scale;
+        const y = cfg.spawnY;
+        const fill = spriteCache.getColor(spriteCache.getColorIndex(v));
+
+        // Reduced canvas state changes
+        const oldAlpha = ctx.globalAlpha;
+        const oldShadowColor = ctx.shadowColor;
+        const oldShadowBlur = ctx.shadowBlur;
+        const oldLineWidth = ctx.lineWidth;
+        const oldStrokeStyle = ctx.strokeStyle;
+
+        ctx.globalAlpha = alpha;
+        ctx.shadowColor = fill;
+        ctx.shadowBlur = 16 * scale;
+
+        // Draw main circle
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = fill;
+        ctx.fill();
+
+        // Draw border
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 3 * scale;
+        ctx.strokeStyle = "rgba(255,255,255,.22)";
+        ctx.beginPath();
+        ctx.arc(x, y, Math.max(1, r - 3 * scale), 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Text with animation (only when needed)
+        if (animationProgress > 0.5) {
+          const textAlpha = (animationProgress - 0.5) * 2;
+          const pulse = 0.95 + 0.05 * Math.sin(now * 0.003);
+          ctx.globalAlpha = alpha * textAlpha;
+          ctx.fillStyle = "#0b0e15";
+          const fontSize = Math.max(10, 18 * (r / cfg.radius));
+          ctx.font = `bold ${fontSize * pulse}px Inter, ui-sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(String(v), x, y);
+        }
+
+        // Restore state efficiently
+        ctx.globalAlpha = oldAlpha;
+        ctx.shadowColor = oldShadowColor;
+        ctx.shadowBlur = oldShadowBlur;
+        ctx.lineWidth = oldLineWidth;
+        ctx.strokeStyle = oldStrokeStyle;
+      }
+
+      // Batched circle rendering
+      function drawAllCircles(): void {
+        // Sort circles by depth for better rendering
+        const sortedCircles = Array.from(state.circles.values()).sort(
+          (a, b) => a.body.position.y - b.body.position.y
+        );
+
+        for (const data of sortedCircles) {
           drawCircle(
             data.body.position.x,
             data.body.position.y,
@@ -1089,14 +1337,14 @@ export default function SuokaGame() {
             data.body.id
           );
         }
-
-        drawParticles();
       }
 
-      // Unified pointer input handling
+      // High-FPS optimized pointer input handling
       function updatePreviewFromClientX(clientX: number): void {
         const now = performance.now();
-        if (now - state.previewUpdateTime < 16) return; // Throttle to ~60fps
+        // Adaptive throttling based on target FPS
+        const throttleMs = Math.max(4, 1000 / (stepRunner.getTargetFPS() * 2)); // 2x input rate vs display
+        if (now - state.previewUpdateTime < throttleMs) return;
         state.previewUpdateTime = now;
 
         const rect = canvas.getBoundingClientRect();

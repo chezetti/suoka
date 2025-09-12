@@ -485,16 +485,19 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  z-index: 2;
 }
 
 .danger::before,
 .danger::after {
   content: "";
   position: absolute;
-  top: 0;
-  height: 2px;
-  background-image: repeating-linear-gradient(90deg, transparent 0 8px, var(--brand-danger) 8px 14px);
-  box-shadow: 0 0 10px var(--brand-danger);
+  top: -1px;
+  height: 3px;
+  background-image: repeating-linear-gradient(90deg, transparent 0px 8px, #ff4d5a 8px 16px);
+  box-shadow: 0 0 12px #ff4d5a;
+  opacity: 0.9;
+  z-index: 1;
 }
 
 .danger::before {
@@ -823,7 +826,7 @@ body {
   .danger {
     left: 8px;
     right: 8px;
-    top: calc(8px + 120px);
+    top: calc(8px + min(150px, max(80px, 20vh)));
   }
   
   .danger::before {
